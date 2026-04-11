@@ -1,28 +1,18 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 
 	"mydiscordbot/bot"
+	"mydiscordbot/commands"
+	"mydiscordbot/config"
 )
 
 func main() {
-	configFile, err := os.Open("config.json")
-	if err != nil {
-		fmt.Println("Error opening config file:", err)
-		return
-	}
-	defer configFile.Close()
 
-	var config bot.Config
-	if err := json.NewDecoder(configFile).Decode(&config); err != nil {
-		fmt.Println("Error parsing config file:", err)
-		return
-	}
+	bot.RegisterCommand(&commands.AddCommand{})
 
-	manager, err := bot.NewManager(config.Token, config.VoiceChannelID, config.GuildID, config.MusicFolders, config.RecursiveSearch)
+	manager, err := bot.NewManager(config.NewConfig())
 	if err != nil {
 		fmt.Println("Error creating bot manager:", err)
 		return
