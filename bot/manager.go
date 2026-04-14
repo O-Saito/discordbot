@@ -58,6 +58,7 @@ func (m *Manager) RecursiveSearch() bool {
 
 func (m *Manager) Start() error {
 	m.session.AddHandler(m.onReady)
+	m.session.AddHandler(m.onGuildCreate)
 	m.session.AddHandler(m.onMessageCreate)
 	m.session.AddHandler(m.onGuildLeave)
 	m.session.AddHandler(m.onVoiceStateUpdate)
@@ -158,8 +159,13 @@ func (m *Manager) RemoveGuildState(guildID string) {
 
 func (m *Manager) onReady(s *discordgo.Session, r *discordgo.Ready) {
 	fmt.Printf("Logged in as: %s#%s\n", s.State.User.Username, s.State.User.Discriminator)
-	//m.mu.Lock()
-	//defer m.mu.Unlock()
+
+	s.State.RLock()
+	for _, guild := range s.State.Guilds {
+		m.GetGuildState(guild.ID)
+		fmt.Printf("Registered guild: %s (%s)\n", guild.Name, guild.ID)
+	}
+	s.State.RUnlock()
 
 	if m.config.VoiceChannelID != "" && m.config.GuildID != "" {
 		state := m.GetGuildState(m.config.GuildID)
@@ -172,6 +178,11 @@ func (m *Manager) onReady(s *discordgo.Session, r *discordgo.Ready) {
 		}
 		//cmd.Execute(state, s, &map[string]any{"query": "something"})
 	}
+}
+
+func (m *Manager) onGuildCreate(s *discordgo.Session, g *discordgo.GuildCreate) {
+	fmt.Printf("Guild created/joined: %s (%s)\n", g.Name, g.ID)
+	m.GetGuildState(g.ID)
 }
 
 func (m *Manager) onVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceState) {

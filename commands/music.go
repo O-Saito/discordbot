@@ -391,7 +391,7 @@ func addURL(cs *bot.CommandState, url string) error {
 			}
 			s.ChannelMessageSend("", "Playlist added!")
 
-			ensurePlaybackGoroutine(g)
+			ensurePlaybackGoroutine(cs)
 		})
 		return nil
 	}
@@ -422,7 +422,7 @@ func addURL(cs *bot.CommandState, url string) error {
 
 			cs.SingleRespond(fmt.Sprintf("%s adicionado a queue", track.Title()))
 
-			ensurePlaybackGoroutine(cs.G)
+			ensurePlaybackGoroutine(cs)
 		})
 	})
 
@@ -450,7 +450,7 @@ func searchAndAdd(cs *bot.CommandState, query string) error {
 			}
 
 			cs.SingleRespond("Adicionado: " + track.Title())
-			ensurePlaybackGoroutine(g)
+			ensurePlaybackGoroutine(cs)
 			return
 		}
 
@@ -497,7 +497,7 @@ func searchAndAddYouTube(cs *bot.CommandState, query string) error {
 
 				cs.SingleRespond("Adicionado: " + track.Title())
 
-				ensurePlaybackGoroutine(cs.G)
+				ensurePlaybackGoroutine(cs)
 			})
 		})
 	})
@@ -506,10 +506,32 @@ func searchAndAddYouTube(cs *bot.CommandState, query string) error {
 }
 
 func playNext(cs *bot.CommandState) {
-	ensurePlaybackGoroutine(cs.G)
+	ensurePlaybackGoroutine(cs)
 }
 
-func ensurePlaybackGoroutine(g *bot.GuildState) {
+func ensurePlaybackGoroutine(cs *bot.CommandState) {
+	g := cs.G
+
+	if g.VoiceConnection == nil && cs.I != nil {
+		userID := cs.I.Member.User.ID
+		guildID := g.GuildId
+
+		vs, err := cs.S.State.VoiceState(guildID, userID)
+		if err != nil || vs == nil || vs.ChannelID == "" {
+			cs.SingleRespond("You are not in a voice channel")
+			return
+		}
+
+		vc, err := cs.S.ChannelVoiceJoin(guildID, vs.ChannelID, false, true)
+		if err != nil {
+			cs.SingleRespond("Failed to join voice channel: " + err.Error())
+			return
+		}
+
+		g.VoiceConnection = vc
+		g.VoiceChannel = vs.ChannelID
+	}
+
 	if g.PlaybackControl == nil {
 		g.PlaybackControl = make(chan string)
 		g.PlaybackDone = make(chan struct{})
