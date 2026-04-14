@@ -187,7 +187,32 @@ func handleQueue(cs *bot.CommandState, opts *map[string]any) error {
 }
 
 func handleVolume(cs *bot.CommandState, opts *map[string]any) error {
-	cs.SingleRespond("Volume functionality not implemented yet")
+	level, hasLevel := (*opts)["level"]
+
+	if !hasLevel {
+		vol := cs.G.Player.Volume()
+		volPercent := int(vol * 100)
+		cs.SingleRespond(fmt.Sprintf("Volume: %d%%", volPercent))
+		return nil
+	}
+
+	levelInt, ok := level.(int64)
+	if !ok {
+		cs.SingleRespond("Invalid volume level")
+		return nil
+	}
+
+	if levelInt < 0 || levelInt > 100 {
+		cs.SingleRespond("Volume must be between 0 and 100")
+		return nil
+	}
+
+	volume := float64(levelInt) / 100.0
+	cs.G.Player.SetVolume(volume)
+	cs.G.Volume = int(levelInt)
+	cs.G.Data["volume"] = int(levelInt)
+
+	cs.SingleRespond(fmt.Sprintf("Volume: %d%%", levelInt))
 	return nil
 }
 
@@ -402,6 +427,10 @@ func searchAndAddYouTube(cs *bot.CommandState, query string) error {
 }
 
 func playNext(cs *bot.CommandState) {
+	if cs.G.IsPlaying {
+		return
+	}
+
 	if cs.G.Queue.IsEmpty() {
 		autoplay, ok := cs.G.Data["autoplay"].(bool)
 		if ok && autoplay {

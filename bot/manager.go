@@ -1,12 +1,10 @@
 package bot
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
-	"strings"
 	"sync"
 	"syscall"
 
@@ -15,8 +13,6 @@ import (
 	"mydiscordbot/audio"
 	"mydiscordbot/config"
 	"mydiscordbot/domain"
-	"mydiscordbot/services/file"
-	"mydiscordbot/services/ytdlp"
 )
 
 type Manager struct {
@@ -210,63 +206,11 @@ func (m *Manager) onMessageCreate(s *discordgo.Session, msg *discordgo.MessageCr
 		return
 	}
 
-	content := msg.Content
-
 	guildID := msg.GuildID
 	if guildID == "" {
 		return
 	}
 
-	state := m.GetGuildState(guildID)
-
-	switch content {
-	case "ping":
-		s.ChannelMessageSend(msg.ChannelID, "pong")
-	case "hello":
-		s.ChannelMessageSend(msg.ChannelID, "Hello!")
-	case "play":
-		if err := m.Play(guildID); err != nil {
-			s.ChannelMessageSend(msg.ChannelID, "Error: "+err.Error())
-		} else {
-			s.ChannelMessageSend(msg.ChannelID, "Playing: "+state.CurrentTrack)
-		}
-	case "stop":
-		m.StopPlay(guildID)
-		s.ChannelMessageSend(msg.ChannelID, "Stopped")
-	case "pause":
-		m.Pause(guildID)
-		s.ChannelMessageSend(msg.ChannelID, "Paused")
-	case "resume":
-		m.Resume(guildID)
-		s.ChannelMessageSend(msg.ChannelID, "Resumed")
-	case "skip":
-		m.playNext(guildID)
-		s.ChannelMessageSend(msg.ChannelID, "Skipped")
-	case "queue":
-		if state.Queue.IsEmpty() {
-			s.ChannelMessageSend(msg.ChannelID, "Queue is empty")
-		} else {
-			tracks := state.Queue.All()
-			queueMsg := "Queue:\n"
-			for i, track := range tracks {
-				queueMsg += fmt.Sprintf("%d. %s\n", i+1, track.Title())
-			}
-			s.ChannelMessageSend(msg.ChannelID, queueMsg)
-		}
-	case "np", "nowplaying":
-		if state.CurrentTrack != "" {
-			s.ChannelMessageSend(msg.ChannelID, "Now playing: "+state.CurrentTrack)
-		} else {
-			s.ChannelMessageSend(msg.ChannelID, "Nothing playing")
-		}
-	case "volume":
-		s.ChannelMessageSend(msg.ChannelID, fmt.Sprintf("Volume: %d%%", state.Volume))
-	default:
-		if strings.HasPrefix(content, "play ") {
-			query := strings.TrimPrefix(content, "play ")
-			m.handlePlayCommand(s, msg.ChannelID, guildID, query)
-		}
-	}
 }
 
 func (m *Manager) onInteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
@@ -321,164 +265,9 @@ func (m *Manager) handleVoiceJoin(state *GuildState, channelID string) {
 	fmt.Printf("Joined voice channel: %s in guild: %s\n", channelID, state.GuildId)
 }
 
-func (m *Manager) handlePlayCommand(s *discordgo.Session, channelID, guildID, query string) {
-	fmt.Printf("Handling play command for guild: %s, query: %s\n", guildID, query)
-	state := m.GetGuildState(guildID)
-
-	if len(m.config.MusicFolders) > 0 {
-		fileSvc := file.New()
-		fileSvc.Search(m.config.MusicFolders, query, m.config.RecursiveSearch, func(results []domain.Track, err error) {
-			if err == nil && len(results) > 0 {
-				state.Queue.Enqueue(results[0])
-				s.ChannelMessageSend(channelID, "Added to queue: "+results[0].Title())
-				if !state.IsPlaying {
-					m.Play(guildID)
-				}
-				return
-			}
-
-			ytSvc := ytdlp.New()
-			ytSvc.Search(context.Background(), query, 5, func(results []domain.SearchResult, err error) {
-				if err != nil || len(results) == 0 {
-					s.ChannelMessageSend(channelID, "No results found")
-					return
-				}
-
-				ytSvc.ParseURL(context.Background(), results[0].URL, func(track domain.Track, err error) {
-					if err != nil {
-						s.ChannelMessageSend(channelID, "Error parsing URL: "+err.Error())
-						return
-					}
-
-					ytSvc.GetAudioURL(context.Background(), results[0].URL, func(audioURL string, err error) {
-						if err != nil {
-							s.ChannelMessageSend(channelID, "Error getting audio URL: "+err.Error())
-							return
-						}
-
-						track.SetAudioURL(audioURL)
-						state.Queue.Enqueue(track)
-						s.ChannelMessageSend(channelID, "Added to queue: "+track.Title())
-
-						if !state.IsPlaying {
-							m.Play(guildID)
-						}
-					})
-				})
-			})
-		})
-		return
-	}
-
-	ytSvc := ytdlp.New()
-	ytSvc.Search(context.Background(), query, 5, func(results []domain.SearchResult, err error) {
-		if err != nil || len(results) == 0 {
-			s.ChannelMessageSend(channelID, "No results found")
-			return
-		}
-
-		ytSvc.ParseURL(context.Background(), results[0].URL, func(track domain.Track, err error) {
-			if err != nil {
-				s.ChannelMessageSend(channelID, "Error parsing URL: "+err.Error())
-				return
-			}
-
-			ytSvc.GetAudioURL(context.Background(), results[0].URL, func(audioURL string, err error) {
-				if err != nil {
-					s.ChannelMessageSend(channelID, "Error getting audio URL: "+err.Error())
-					return
-				}
-
-				track.SetAudioURL(audioURL)
-				state.Queue.Enqueue(track)
-				s.ChannelMessageSend(channelID, "Added to queue: "+track.Title())
-
-				if !state.IsPlaying {
-					m.Play(guildID)
-				}
-			})
-		})
-	})
-}
-
 func (m *Manager) AddToQueue(guildID string, track domain.Track) {
 	state := m.GetGuildState(guildID)
 	state.Queue.Enqueue(track)
-}
-
-func (m *Manager) Play(guildID string) error {
-	state := m.GetGuildState(guildID)
-
-	if state.Queue.IsEmpty() {
-		return fmt.Errorf("queue is empty")
-	}
-
-	if state.VoiceConnection == nil {
-		return fmt.Errorf("not in a voice channel")
-	}
-
-	track, err := state.Queue.Dequeue()
-	if err != nil {
-		return err
-	}
-
-	state.CurrentTrack = track.Title()
-	state.IsPlaying = true
-
-	state.Player.SetOnFinishedCallback(func() {
-		m.playNext(guildID)
-	})
-
-	return state.Player.PlayURLWithSeekAndVC(track.AudioURL(), 48000, 0, state.VoiceConnection)
-}
-
-func (m *Manager) playNext(guildID string) {
-	state := m.GetGuildState(guildID)
-
-	if state.Queue.IsEmpty() {
-		state.CurrentTrack = ""
-		state.IsPlaying = false
-		return
-	}
-
-	state.Player.SetOnFinishedCallback(func() {
-		m.playNext(guildID)
-	})
-
-	track, err := state.Queue.Dequeue()
-	if err != nil {
-		state.CurrentTrack = ""
-		state.IsPlaying = false
-		return
-	}
-
-	state.CurrentTrack = track.Title()
-	state.Player.PlayURLWithSeekAndVC(track.AudioURL(), 48000, 0, state.VoiceConnection)
-}
-
-func (m *Manager) StopPlay(guildID string) {
-	state := m.GetGuildState(guildID)
-	if state.Player != nil {
-		state.Player.Stop()
-	}
-	state.IsPlaying = false
-	state.CurrentTrack = ""
-}
-
-func (m *Manager) Pause(guildID string) {
-	state := m.GetGuildState(guildID)
-	if state.Player != nil {
-		state.Player.Pause()
-	}
-	state.IsPlaying = false
-}
-
-func (m *Manager) Resume(guildID string) {
-	state := m.GetGuildState(guildID)
-	if state.Player != nil {
-		state.Player.Resume()
-	}
-	state.IsPlaying = true
 }
 
 func (m *Manager) onGuildLeave(s *discordgo.Session, event *discordgo.GuildDelete) {

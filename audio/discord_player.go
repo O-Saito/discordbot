@@ -70,7 +70,9 @@ func (p *DiscordPlayer) PlayURLWithSeek(url string, sampleRate int, seekSeconds 
 	p.volumeMu.Unlock()
 
 	isHTTP := strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")
+	p.playerMu.Lock()
 	p.isHTTP = isHTTP
+	p.playerMu.Unlock()
 
 	ffmpegReader, ffmpegWriter := io.Pipe()
 	stderrBuf := &bytes.Buffer{}
@@ -151,9 +153,7 @@ func (p *DiscordPlayer) PlayURLWithSeek(url string, sampleRate int, seekSeconds 
 
 		if atomic.LoadInt32(&p.stopped) == 0 {
 			atomic.StoreInt32(&p.playing, 0)
-			if p.onFinished != nil {
-				p.onFinished()
-			}
+			p.Stop()
 		}
 	}()
 
@@ -175,7 +175,9 @@ func (p *DiscordPlayer) PlayURLWithSeekAndVC(url string, sampleRate int, seekSec
 	p.volumeMu.Unlock()
 
 	isHTTP := strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")
+	p.playerMu.Lock()
 	p.isHTTP = isHTTP
+	p.playerMu.Unlock()
 
 	ffmpegReader, ffmpegWriter := io.Pipe()
 	stderrBuf := &bytes.Buffer{}
@@ -263,9 +265,7 @@ func (p *DiscordPlayer) PlayURLWithSeekAndVC(url string, sampleRate int, seekSec
 
 		if atomic.LoadInt32(&p.stopped) == 0 {
 			atomic.StoreInt32(&p.playing, 0)
-			if p.onFinished != nil {
-				p.onFinished()
-			}
+			p.Stop()
 		}
 	}()
 
@@ -290,7 +290,11 @@ func (p *DiscordPlayer) sendPCM(vc *discordgo.VoiceConnection) {
 
 		vc.OpusSend <- opus
 
-		if p.isHTTP {
+		p.playerMu.Lock()
+		isHTTP := p.isHTTP
+		p.playerMu.Unlock()
+
+		if isHTTP {
 			time.Sleep(19 * time.Millisecond)
 		}
 	}
@@ -306,7 +310,9 @@ func (p *DiscordPlayer) Resume() {
 
 func (p *DiscordPlayer) Stop() {
 	if p.onFinished != nil {
+		callback := p.onFinished
 		p.onFinished = nil
+		callback()
 	}
 
 	atomic.StoreInt32(&p.stopped, 1)
