@@ -42,7 +42,31 @@ func BuildListPageComponents(tracks []domain.Track, page, totalPages int) (*disc
 		})
 	}
 
-	buttons := []discordgo.MessageComponent{
+	var selectOptions []discordgo.SelectMenuOption
+	for idx := start; idx < end; idx++ {
+		title := tracks[idx].Title()
+		if len(title) > 100 {
+			title = title[:97] + "..."
+		}
+		selectOptions = append(selectOptions, discordgo.SelectMenuOption{
+			Label: fmt.Sprintf("%d. %s", idx+1, title),
+			Value: fmt.Sprintf("%s_select_%d_%d", MusicPrefix, page, idx),
+		})
+	}
+
+	minVals := 1
+	components := []discordgo.MessageComponent{
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.SelectMenu{
+					CustomID:    fmt.Sprintf("%s_select_%d", MusicPrefix, page),
+					MinValues:   &minVals,
+					MaxValues:   1,
+					Options:     selectOptions,
+					Placeholder: "Select a track to add to queue...",
+				},
+			},
+		},
 		discordgo.ActionsRow{
 			Components: []discordgo.MessageComponent{
 				discordgo.Button{
@@ -61,7 +85,7 @@ func BuildListPageComponents(tracks []domain.Track, page, totalPages int) (*disc
 		},
 	}
 
-	return embed, buttons
+	return embed, components
 }
 
 func ParseListPageAction(customID string) (page int, ok bool) {
@@ -98,4 +122,54 @@ func ParseListPageAction(customID string) (page int, ok bool) {
 
 	fmt.Printf("[ParseListPageAction] FAILED: no prev_ or next_ prefix\n")
 	return 0, false
+}
+
+func ParseListPlayAction(customID string) (page, trackIndex int, ok bool) {
+	if !strings.HasPrefix(customID, "play_") {
+		return 0, 0, false
+	}
+
+	parts := strings.TrimPrefix(customID, "play_")
+	partsSlice := strings.Split(parts, "_")
+	if len(partsSlice) != 2 {
+		return 0, 0, false
+	}
+
+	page, err := strconv.Atoi(partsSlice[0])
+	if err != nil {
+		return 0, 0, false
+	}
+
+	trackIdx, err := strconv.Atoi(partsSlice[1])
+	if err != nil {
+		return 0, 0, false
+	}
+
+	fmt.Printf("[ParseListPlayAction] page=%d, trackIndex=%d\n", page, trackIdx)
+	return page, trackIdx, true
+}
+
+func ParseListSelectAction(customID string) (page, trackIndex int, ok bool) {
+	if !strings.HasPrefix(customID, "music_select_") {
+		return 0, 0, false
+	}
+
+	parts := strings.TrimPrefix(customID, "music_select_")
+	partsSlice := strings.Split(parts, "_")
+	if len(partsSlice) != 2 {
+		return 0, 0, false
+	}
+
+	page, err := strconv.Atoi(partsSlice[0])
+	if err != nil {
+		return 0, 0, false
+	}
+
+	trackIdx, err := strconv.Atoi(partsSlice[1])
+	if err != nil {
+		return 0, 0, false
+	}
+
+	fmt.Printf("[ParseListSelectAction] page=%d, trackIndex=%d\n", page, trackIdx)
+	return page, trackIdx, true
 }

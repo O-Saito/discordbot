@@ -39,16 +39,14 @@ func (c *MusicCommand) Name() string        { return "music" }
 func (c *MusicCommand) Description() string { return "Music player commands" }
 
 func (c *MusicCommand) HandleButton(cs *bot.CommandState, customID string) error {
+	musicFolders := cs.G.Manager.MusicFolders()
+	recursive := cs.G.Manager.RecursiveSearch()
+
 	page, ok := discord_helper.ParseListPageAction(customID)
 	if !ok {
 		fmt.Printf("[Music HandleButton] Failed to parse customID=%s\n", customID)
 		return nil
 	}
-
-	fmt.Printf("[Music HandleButton] After parsing: page=%d, ok=%v\n", page, ok)
-
-	musicFolders := cs.G.Manager.MusicFolders()
-	recursive := cs.G.Manager.RecursiveSearch()
 
 	fileSvc := file.New()
 	fileSvc.ListAll(musicFolders, recursive, func(tracks []domain.Track, err error) {
@@ -65,11 +63,7 @@ func (c *MusicCommand) HandleButton(cs *bot.CommandState, customID string) error
 		channelID := cs.I.ChannelID
 		messageID := cs.I.Message.ID
 
-		fmt.Printf("[Music HandleButton] Re-scan: tracks=%d, totalPages=%d\n", len(tracks), totalPages)
-
 		embed, buttons := discord_helper.BuildListPageComponents(tracks, page, totalPages)
-
-		fmt.Printf("[Music HandleButton] Before edit: messageID=%s, channelID=%s\n", messageID, channelID)
 
 		_, editErr := cs.S.ChannelMessageEditComplex(&discordgo.MessageEdit{
 			Channel:    channelID,
@@ -79,9 +73,52 @@ func (c *MusicCommand) HandleButton(cs *bot.CommandState, customID string) error
 		})
 		if editErr != nil {
 			fmt.Printf("[Music HandleButton] Edit error: %v\n", editErr)
-		} else {
-			fmt.Printf("[Music HandleButton] Edit success\n")
 		}
+	})
+
+	return nil
+}
+
+func (c *MusicCommand) HandleSelectMenu(cs *bot.CommandState, customID string, values []string) error {
+	musicFolders := cs.G.Manager.MusicFolders()
+	recursive := cs.G.Manager.RecursiveSearch()
+
+	selectedValue := ""
+	if len(values) > 0 {
+		selectedValue = values[0]
+	}
+
+	page, trackIndex, ok := discord_helper.ParseListSelectAction(selectedValue)
+	if !ok {
+		fmt.Printf("[Music HandleSelectMenu] Failed to parse customID=%s\n", selectedValue)
+		return nil
+	}
+
+	fmt.Printf("[Music HandleSelectMenu] page=%d, trackIndex=%d\n", page, trackIndex)
+
+	fileSvc := file.New()
+	fileSvc.ListAll(musicFolders, recursive, func(tracks []domain.Track, err error) {
+		if err != nil {
+			cs.SingleRespond("Error listing files: " + err.Error())
+			return
+		}
+
+		globalIndex := page*10 + trackIndex
+		if globalIndex >= len(tracks) {
+			cs.SingleRespond("Track not found")
+			return
+		}
+
+		track := tracks[globalIndex]
+		queueErr := cs.G.Queue.Enqueue(track)
+		if queueErr != nil {
+			cs.SingleRespond("Failed to add to queue: " + queueErr.Error())
+			return
+		}
+
+		ensurePlaybackGoroutine(cs)
+
+		cs.SingleRespond(fmt.Sprintf("Added to queue: %s", track.Title()))
 	})
 
 	return nil

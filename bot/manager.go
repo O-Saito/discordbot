@@ -314,7 +314,7 @@ func (m *Manager) handleMessageComponent(s *discordgo.Session, i *discordgo.Inte
 		return
 	}
 
-	fmt.Printf("[Interaction] Handling: cmd=%s, action=%s\n", cmd.Name(), parts[1])
+	fmt.Printf("[Interaction] Handling: cmd=%s, action=%s\n", cmd.Name(), strings.Join(parts[1:], "_"))
 
 	CommandState := &CommandState{
 		G:    state,
@@ -329,10 +329,10 @@ func (m *Manager) handleMessageComponent(s *discordgo.Session, i *discordgo.Inte
 
 	switch componentType {
 	case discordgo.ButtonComponent:
-		cmd.HandleButton(CommandState, parts[1])
+		cmd.HandleButton(CommandState, strings.Join(parts[1:], "_"))
 	case discordgo.SelectMenuComponent:
 		values := componentData.Values
-		cmd.HandleSelectMenu(CommandState, parts[1], values)
+		cmd.HandleSelectMenu(CommandState, strings.Join(parts[1:], "_"), values)
 	}
 }
 
