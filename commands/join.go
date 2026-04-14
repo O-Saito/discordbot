@@ -7,7 +7,9 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
-type JoinCommand struct{}
+type JoinCommand struct {
+	bot.CommandBase
+}
 
 func (c *JoinCommand) Name() string        { return "join" }
 func (c *JoinCommand) Description() string { return "Join a voice channel" }

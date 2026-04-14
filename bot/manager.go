@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -245,6 +246,17 @@ func (m *Manager) onInteractionCreate(s *discordgo.Session, i *discordgo.Interac
 	state.mu.Lock()
 	defer state.mu.Unlock()
 
+	switch i.Type {
+	case discordgo.InteractionApplicationCommand:
+		m.handleApplicationCommand(s, i, state)
+	case discordgo.InteractionMessageComponent:
+		m.handleMessageComponent(s, i, state)
+	case discordgo.InteractionModalSubmit:
+		m.handleModalSubmit(s, i, state)
+	}
+}
+
+func (m *Manager) handleApplicationCommand(s *discordgo.Session, i *discordgo.InteractionCreate, state *GuildState) {
 	cmd := GetCommand(i.ApplicationCommandData().Name)
 	if cmd == nil {
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -268,6 +280,112 @@ func (m *Manager) onInteractionCreate(s *discordgo.Session, i *discordgo.Interac
 	fmt.Printf("Executing %s command\n", i.ApplicationCommandData().Name)
 
 	cmd.Execute(CommandState)
+}
+
+func (m *Manager) handleMessageComponent(s *discordgo.Session, i *discordgo.InteractionCreate, state *GuildState) {
+	componentData := i.MessageComponentData()
+	customID := componentData.CustomID
+	if customID == "" {
+		return
+	}
+
+	componentType := componentData.ComponentType
+	componentStr := "unknown"
+	switch componentType {
+	case discordgo.ButtonComponent:
+		componentStr = "button"
+	case discordgo.SelectMenuComponent:
+		componentStr = "selectMenu"
+	}
+	fmt.Printf("[Interaction] Received %s from guild=%s, channel=%s, message=%s, customID=%s\n",
+		componentStr, i.GuildID, i.ChannelID, i.Message.ID, customID)
+
+	parts := strings.SplitN(customID, "_", 2)
+	if len(parts) < 2 {
+		return
+	}
+
+	cmd := GetCommand(parts[0])
+	if cmd == nil {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseDeferredMessageUpdate,
+		})
+		fmt.Printf("[Interaction] Command not found: %s\n", parts[0])
+		return
+	}
+
+	fmt.Printf("[Interaction] Handling: cmd=%s, action=%s\n", cmd.Name(), parts[1])
+
+	CommandState := &CommandState{
+		G:    state,
+		S:    s,
+		I:    i,
+		Args: nil,
+	}
+
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredMessageUpdate,
+	})
+
+	switch componentType {
+	case discordgo.ButtonComponent:
+		cmd.HandleButton(CommandState, parts[1])
+	case discordgo.SelectMenuComponent:
+		values := componentData.Values
+		cmd.HandleSelectMenu(CommandState, parts[1], values)
+	}
+}
+
+func (m *Manager) handleModalSubmit(s *discordgo.Session, i *discordgo.InteractionCreate, state *GuildState) {
+	data := i.ModalSubmitData()
+	customID := data.CustomID
+	if customID == "" {
+		return
+	}
+
+	fmt.Printf("[Interaction] Received modal from guild=%s, channel=%s, customID=%s\n",
+		i.GuildID, i.ChannelID, customID)
+
+	parts := strings.SplitN(customID, "_", 2)
+	if len(parts) < 2 {
+		return
+	}
+
+	cmd := GetCommand(parts[0])
+	if cmd == nil {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseDeferredMessageUpdate,
+		})
+		fmt.Printf("[Interaction] Command not found for modal: %s\n", parts[0])
+		return
+	}
+
+	fmt.Printf("[Interaction] Handling modal: cmd=%s, action=%s\n", cmd.Name(), parts[1])
+
+	modalData := make(map[string]string)
+	for _, row := range data.Components {
+		switch row := row.(type) {
+		case *discordgo.ActionsRow:
+			for _, comp := range row.Components {
+				if ti, ok := comp.(*discordgo.TextInput); ok {
+					modalData[ti.CustomID] = ti.Value
+				}
+			}
+		}
+	}
+
+	CommandState := &CommandState{
+		G:    state,
+		S:    s,
+		I:    i,
+		Args: nil,
+	}
+
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredMessageUpdate,
+	})
+
+	cmd.HandleModalSubmit(CommandState, parts[1], modalData)
 }
 
 func (m *Manager) handleVoiceJoin(state *GuildState, channelID string) {

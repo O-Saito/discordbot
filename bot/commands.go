@@ -32,12 +32,28 @@ func (cs *CommandState) SingleRespond(content string) {
 	cs.hasResponded = true
 }
 
+type CommandBase struct{}
+
+func (CommandBase) HandleButton(cs *CommandState, customID string) error {
+	return nil
+}
+func (CommandBase) HandleSelectMenu(cs *CommandState, customID string, values []string) error {
+	return nil
+}
+func (CommandBase) HandleModalSubmit(cs *CommandState, customID string, data map[string]string) error {
+	return nil
+}
+
 type Command interface {
 	Name() string
 	Description() string
 	Execute(cs *CommandState) error
 	ParseInteraction(i *discordgo.InteractionCreate) *map[string]any
 	GetApplicationCommand() *discordgo.ApplicationCommand
+
+	HandleButton(cs *CommandState, customID string) error
+	HandleSelectMenu(cs *CommandState, customID string, values []string) error
+	HandleModalSubmit(cs *CommandState, customID string, data map[string]string) error
 }
 
 var commandRegistry = make(map[string]Command)

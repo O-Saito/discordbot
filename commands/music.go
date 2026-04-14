@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"mydiscordbot/bot"
+	"mydiscordbot/discord_helper"
 	"mydiscordbot/domain"
 	"mydiscordbot/services/file"
 	"mydiscordbot/services/ytdlp"
@@ -30,10 +31,61 @@ var musicHandlers = map[string]musicHandler{
 	"init":     handleInit,
 }
 
-type MusicCommand struct{}
+type MusicCommand struct {
+	bot.CommandBase
+}
 
 func (c *MusicCommand) Name() string        { return "music" }
 func (c *MusicCommand) Description() string { return "Music player commands" }
+
+func (c *MusicCommand) HandleButton(cs *bot.CommandState, customID string) error {
+	page, ok := discord_helper.ParseListPageAction(customID)
+	if !ok {
+		fmt.Printf("[Music HandleButton] Failed to parse customID=%s\n", customID)
+		return nil
+	}
+
+	fmt.Printf("[Music HandleButton] After parsing: page=%d, ok=%v\n", page, ok)
+
+	musicFolders := cs.G.Manager.MusicFolders()
+	recursive := cs.G.Manager.RecursiveSearch()
+
+	fileSvc := file.New()
+	fileSvc.ListAll(musicFolders, recursive, func(tracks []domain.Track, err error) {
+		if err != nil {
+			fmt.Printf("[Music HandleButton] ListAll error: %v\n", err)
+			return
+		}
+
+		totalPages := (len(tracks) + 9) / 10
+		if totalPages == 0 {
+			totalPages = 1
+		}
+
+		channelID := cs.I.ChannelID
+		messageID := cs.I.Message.ID
+
+		fmt.Printf("[Music HandleButton] Re-scan: tracks=%d, totalPages=%d\n", len(tracks), totalPages)
+
+		embed, buttons := discord_helper.BuildListPageComponents(tracks, page, totalPages)
+
+		fmt.Printf("[Music HandleButton] Before edit: messageID=%s, channelID=%s\n", messageID, channelID)
+
+		_, editErr := cs.S.ChannelMessageEditComplex(&discordgo.MessageEdit{
+			Channel:    channelID,
+			ID:         messageID,
+			Embed:      embed,
+			Components: &buttons,
+		})
+		if editErr != nil {
+			fmt.Printf("[Music HandleButton] Edit error: %v\n", editErr)
+		} else {
+			fmt.Printf("[Music HandleButton] Edit success\n")
+		}
+	})
+
+	return nil
+}
 
 func (c *MusicCommand) ParseInteraction(i *discordgo.InteractionCreate) *map[string]any {
 	subCmd := i.ApplicationCommandData().Options[0]
@@ -299,35 +351,39 @@ func handleList(cs *bot.CommandState, opts *map[string]any) error {
 			return
 		}
 
-		totalCount := len(tracks)
-		displayCount := totalCount
-		if displayCount > 10 {
-			displayCount = 10
+		totalPages := (len(tracks) + 9) / 10
+		if totalPages == 0 {
+			totalPages = 1
 		}
 
-		embed := &discordgo.MessageEmbed{
-			Title:       "🎵 Music Library",
-			Description: fmt.Sprintf("Found %d files (showing %d)", totalCount, displayCount),
-			Color:       0x3498db,
-			Fields:      []*discordgo.MessageEmbedField{},
-		}
-
-		for i := 0; i < displayCount; i++ {
-			title := tracks[i].Title()
-			if len(title) > 100 {
-				title = title[:97] + "..."
-			}
-			embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
-				Name:   fmt.Sprintf("%d. %s", i+1, title),
-				Inline: false,
-			})
-		}
-
-		cs.S.ChannelMessageSendEmbed(channelID, embed)
+		embed, buttons := discord_helper.BuildListPageComponents(tracks, 0, totalPages)
+		cs.S.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+			Embed:      embed,
+			Components: buttons,
+		})
 	})
 
 	cs.SingleRespond("Loading music files...")
 	return nil
+}
+
+func sendListPage(cs *bot.CommandState, channelID string, page int) *discordgo.Message {
+	tracks := cs.G.Data["list_tracks"].([]domain.Track)
+	totalPages := cs.G.Data["list_totalPages"].(int)
+
+	embed, buttons := discord_helper.BuildListPageComponents(tracks, page, totalPages)
+
+	msg, err := cs.S.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+		Embed:      embed,
+		Components: buttons,
+	})
+
+	if err != nil {
+		fmt.Printf("Error sending list page: %v\n", err)
+		return nil
+	}
+
+	return msg
 }
 
 func handleAutoplay(cs *bot.CommandState, opts *map[string]any) error {

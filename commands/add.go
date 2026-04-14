@@ -7,7 +7,9 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
-type AddCommand struct{}
+type AddCommand struct {
+	bot.CommandBase
+}
 
 func (c *AddCommand) Name() string        { return "add" }
 func (c *AddCommand) Description() string { return "Add a track to queue (url or search query)" }
