@@ -571,6 +571,8 @@ func startPlayback(g *bot.GuildState) {
 		select {
 		case <-g.Player.Finished():
 			fmt.Printf("[Playback] Track finished signal received!\n")
+			fmt.Printf("[Playback] After finished - IsPlaying: %v, QueueSize: %d, autoplay: %v\n",
+				g.Player.IsPlaying(), g.Queue.Size(), g.Data["autoplay"])
 		case cmd := <-g.PlaybackControl:
 			fmt.Printf("[Playback] Received command: %s\n", cmd)
 			handlePlaybackCommand(g, cmd)
