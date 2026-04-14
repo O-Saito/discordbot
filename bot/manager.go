@@ -123,6 +123,7 @@ func (m *Manager) GetGuildState(guildID string) *GuildState {
 		Player:         player,
 		Manager:        m,
 		ActiveCommands: make([]*discordgo.ApplicationCommand, len(commands)),
+		Data:           make(map[string]any),
 	}
 
 	for i, v := range commands {

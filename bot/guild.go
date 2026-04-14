@@ -19,5 +19,6 @@ type GuildState struct {
 	Player          *audio.DiscordPlayer
 	Manager         *Manager
 	ActiveCommands  []*discordgo.ApplicationCommand
+	Data            map[string]any
 	mu              sync.Mutex
 }
