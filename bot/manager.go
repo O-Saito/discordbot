@@ -160,6 +160,21 @@ func (m *Manager) RemoveGuildState(guildID string) {
 func (m *Manager) onReady(s *discordgo.Session, r *discordgo.Ready) {
 	fmt.Printf("Logged in as: %s#%s\n", s.State.User.Username, s.State.User.Discriminator)
 
+	err := s.UpdateStatusComplex(discordgo.UpdateStatusData{
+		Status: string(discordgo.StatusOnline),
+		Activities: []*discordgo.Activity{
+			{
+				Name: "waiting for command!",
+				Type: discordgo.ActivityTypeWatching,
+			},
+		},
+	})
+	if err != nil {
+		fmt.Printf("Failed to set status: %v\n", err)
+	} else {
+		fmt.Printf("Bot status set to: Idle: waiting for command!\n")
+	}
+
 	s.State.RLock()
 	for _, guild := range s.State.Guilds {
 		m.GetGuildState(guild.ID)
@@ -178,6 +193,7 @@ func (m *Manager) onReady(s *discordgo.Session, r *discordgo.Ready) {
 		}
 		//cmd.Execute(state, s, &map[string]any{"query": "something"})
 	}
+
 }
 
 func (m *Manager) onGuildCreate(s *discordgo.Session, g *discordgo.GuildCreate) {

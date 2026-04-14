@@ -219,21 +219,27 @@ func handleSkip(cs *bot.CommandState, opts *map[string]any) error {
 
 func handleQueue(cs *bot.CommandState, opts *map[string]any) error {
 	size := cs.G.Queue.Size()
-	if size == 0 {
-		cs.SingleRespond("Queue is empty")
-		return nil
-	}
 
 	var msg string
+
 	if cs.G.CurrentTrack != "" {
-		msg = fmt.Sprintf("Now playing: %s\n\nQueue (%d):\n", cs.G.CurrentTrack, size)
+		if size > 0 {
+			msg = fmt.Sprintf("Now playing: %s\n\nQueue (%d):\n", cs.G.CurrentTrack, size)
+		} else {
+			msg = fmt.Sprintf("Now playing: %s\n\nQueue is empty", cs.G.CurrentTrack)
+		}
+	} else if size == 0 {
+		cs.SingleRespond("Queue is empty")
+		return nil
 	} else {
 		msg = fmt.Sprintf("Queue (%d):\n", size)
 	}
 
-	items := cs.G.Queue.All()
-	for i, track := range items {
-		msg += fmt.Sprintf("%d. %s\n", i+1, track.Title())
+	if size > 0 {
+		items := cs.G.Queue.All()
+		for i, track := range items {
+			msg += fmt.Sprintf("%d. %s\n", i+1, track.Title())
+		}
 	}
 
 	cs.SingleRespond(msg)
@@ -279,6 +285,8 @@ func handleList(cs *bot.CommandState, opts *map[string]any) error {
 		return nil
 	}
 
+	channelID := cs.I.ChannelID
+
 	fileSvc := file.New()
 	fileSvc.ListAll(musicFolders, recursive, func(tracks []domain.Track, err error) {
 		if err != nil {
@@ -291,19 +299,31 @@ func handleList(cs *bot.CommandState, opts *map[string]any) error {
 			return
 		}
 
-		var msg string
-		if len(tracks) > 20 {
-			msg = fmt.Sprintf("Found %d files (showing first 20):\n", len(tracks))
-			tracks = tracks[:20]
-		} else {
-			msg = fmt.Sprintf("Found %d files:\n", len(tracks))
+		totalCount := len(tracks)
+		displayCount := totalCount
+		if displayCount > 10 {
+			displayCount = 10
 		}
 
-		for i, track := range tracks {
-			msg += fmt.Sprintf("%d. %s\n", i+1, track.Title())
+		embed := &discordgo.MessageEmbed{
+			Title:       "🎵 Music Library",
+			Description: fmt.Sprintf("Found %d files (showing %d)", totalCount, displayCount),
+			Color:       0x3498db,
+			Fields:      []*discordgo.MessageEmbedField{},
 		}
 
-		cs.SingleRespond(msg)
+		for i := 0; i < displayCount; i++ {
+			title := tracks[i].Title()
+			if len(title) > 100 {
+				title = title[:97] + "..."
+			}
+			embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+				Name:   fmt.Sprintf("%d. %s", i+1, title),
+				Inline: false,
+			})
+		}
+
+		cs.S.ChannelMessageSendEmbed(channelID, embed)
 	})
 
 	cs.SingleRespond("Loading music files...")
