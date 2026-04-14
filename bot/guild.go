@@ -20,5 +20,7 @@ type GuildState struct {
 	Manager         *Manager
 	ActiveCommands  []*discordgo.ApplicationCommand
 	Data            map[string]any
+	PlaybackControl chan string
+	PlaybackDone    chan struct{}
 	mu              sync.Mutex
 }

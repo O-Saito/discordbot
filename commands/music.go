@@ -8,6 +8,7 @@ import (
 	"mydiscordbot/services/file"
 	"mydiscordbot/services/ytdlp"
 	"strings"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -162,27 +163,80 @@ func handlePlay(cs *bot.CommandState, opts *map[string]any) error {
 }
 
 func handlePause(cs *bot.CommandState, opts *map[string]any) error {
-	cs.SingleRespond("Pause functionality not implemented yet")
+	if cs.G.VoiceConnection == nil {
+		cs.SingleRespond("Not connected to a voice channel")
+		return nil
+	}
+	if cs.G.PlaybackControl == nil {
+		cs.SingleRespond("Nothing is playing")
+		return nil
+	}
+	cs.G.PlaybackControl <- "pause"
+	cs.SingleRespond("Paused")
 	return nil
 }
 
 func handleResume(cs *bot.CommandState, opts *map[string]any) error {
-	cs.SingleRespond("Resume functionality not implemented yet")
+	if cs.G.VoiceConnection == nil {
+		cs.SingleRespond("Not connected to a voice channel")
+		return nil
+	}
+	if cs.G.PlaybackControl == nil {
+		cs.SingleRespond("Nothing is playing")
+		return nil
+	}
+	cs.G.PlaybackControl <- "resume"
+	cs.SingleRespond("Resumed")
 	return nil
 }
 
 func handleStop(cs *bot.CommandState, opts *map[string]any) error {
-	cs.SingleRespond("Stop functionality not implemented yet")
+	if cs.G.VoiceConnection == nil {
+		cs.SingleRespond("Not connected to a voice channel")
+		return nil
+	}
+	if cs.G.PlaybackControl != nil {
+		cs.G.PlaybackControl <- "stop"
+	}
+	cs.G.Queue.Clear()
+	cs.SingleRespond("Stopped and queue cleared")
 	return nil
 }
 
 func handleSkip(cs *bot.CommandState, opts *map[string]any) error {
-	cs.SingleRespond("Skip functionality not implemented yet")
+	if cs.G.VoiceConnection == nil {
+		cs.SingleRespond("Not connected to a voice channel")
+		return nil
+	}
+	if cs.G.PlaybackControl == nil {
+		cs.SingleRespond("Nothing is playing")
+		return nil
+	}
+	cs.G.PlaybackControl <- "skip"
+	cs.SingleRespond("Skipped")
 	return nil
 }
 
 func handleQueue(cs *bot.CommandState, opts *map[string]any) error {
-	cs.SingleRespond("Queue functionality not implemented yet")
+	size := cs.G.Queue.Size()
+	if size == 0 {
+		cs.SingleRespond("Queue is empty")
+		return nil
+	}
+
+	var msg string
+	if cs.G.CurrentTrack != "" {
+		msg = fmt.Sprintf("Now playing: %s\n\nQueue (%d):\n", cs.G.CurrentTrack, size)
+	} else {
+		msg = fmt.Sprintf("Queue (%d):\n", size)
+	}
+
+	items := cs.G.Queue.All()
+	for i, track := range items {
+		msg += fmt.Sprintf("%d. %s\n", i+1, track.Title())
+	}
+
+	cs.SingleRespond(msg)
 	return nil
 }
 
@@ -217,16 +271,55 @@ func handleVolume(cs *bot.CommandState, opts *map[string]any) error {
 }
 
 func handleList(cs *bot.CommandState, opts *map[string]any) error {
-	cs.SingleRespond("List functionality not implemented yet")
+	musicFolders := cs.G.Manager.MusicFolders()
+	recursive := cs.G.Manager.RecursiveSearch()
+
+	if len(musicFolders) == 0 {
+		cs.SingleRespond("No music folders configured")
+		return nil
+	}
+
+	fileSvc := file.New()
+	fileSvc.ListAll(musicFolders, recursive, func(tracks []domain.Track, err error) {
+		if err != nil {
+			cs.SingleRespond("Failed to list files: " + err.Error())
+			return
+		}
+
+		if len(tracks) == 0 {
+			cs.SingleRespond("No music files found in configured folders")
+			return
+		}
+
+		var msg string
+		if len(tracks) > 20 {
+			msg = fmt.Sprintf("Found %d files (showing first 20):\n", len(tracks))
+			tracks = tracks[:20]
+		} else {
+			msg = fmt.Sprintf("Found %d files:\n", len(tracks))
+		}
+
+		for i, track := range tracks {
+			msg += fmt.Sprintf("%d. %s\n", i+1, track.Title())
+		}
+
+		cs.SingleRespond(msg)
+	})
+
+	cs.SingleRespond("Loading music files...")
 	return nil
 }
 
 func handleAutoplay(cs *bot.CommandState, opts *map[string]any) error {
 	autoplay, ok := cs.G.Data["autoplay"].(bool)
 	if !ok {
-		autoplay = false
+		autoplay = true
+		cs.G.Data["autoplay"] = true
+		cs.SingleRespond("Autoplay: enabled (default)")
+		return nil
 	}
 	cs.G.Data["autoplay"] = !autoplay
+	fmt.Printf("[Autoplay] Toggled to: %v for guild %s\n", cs.G.Data["autoplay"], cs.G.GuildId)
 	if cs.G.Data["autoplay"].(bool) {
 		cs.SingleRespond("Autoplay: enabled")
 	} else {
@@ -238,10 +331,6 @@ func handleAutoplay(cs *bot.CommandState, opts *map[string]any) error {
 func handleInit(cs *bot.CommandState, opts *map[string]any) error {
 	cs.SingleRespond("Init functionality not implemented yet")
 	return nil
-}
-
-func autoPlayNext(cs *bot.CommandState) {
-	cs.SingleRespond("Autoplay: fetching next track...")
 }
 
 func isYouTubeURL(input string) bool {
@@ -302,9 +391,7 @@ func addURL(cs *bot.CommandState, url string) error {
 			}
 			s.ChannelMessageSend("", "Playlist added!")
 
-			if !g.IsPlaying {
-				playNext(cs)
-			}
+			ensurePlaybackGoroutine(g)
 		})
 		return nil
 	}
@@ -335,9 +422,7 @@ func addURL(cs *bot.CommandState, url string) error {
 
 			cs.SingleRespond(fmt.Sprintf("%s adicionado a queue", track.Title()))
 
-			if !cs.G.IsPlaying {
-				playNext(cs)
-			}
+			ensurePlaybackGoroutine(cs.G)
 		})
 	})
 
@@ -365,11 +450,7 @@ func searchAndAdd(cs *bot.CommandState, query string) error {
 			}
 
 			cs.SingleRespond("Adicionado: " + track.Title())
-
-			if !cs.G.IsPlaying {
-				playNext(cs)
-			}
-
+			ensurePlaybackGoroutine(g)
 			return
 		}
 
@@ -416,9 +497,7 @@ func searchAndAddYouTube(cs *bot.CommandState, query string) error {
 
 				cs.SingleRespond("Adicionado: " + track.Title())
 
-				if !cs.G.IsPlaying {
-					playNext(cs)
-				}
+				ensurePlaybackGoroutine(cs.G)
 			})
 		})
 	})
@@ -427,35 +506,98 @@ func searchAndAddYouTube(cs *bot.CommandState, query string) error {
 }
 
 func playNext(cs *bot.CommandState) {
-	if cs.G.IsPlaying {
-		return
-	}
+	ensurePlaybackGoroutine(cs.G)
+}
 
-	if cs.G.Queue.IsEmpty() {
-		autoplay, ok := cs.G.Data["autoplay"].(bool)
-		if ok && autoplay {
-			autoPlayNext(cs)
+func ensurePlaybackGoroutine(g *bot.GuildState) {
+	if g.PlaybackControl == nil {
+		g.PlaybackControl = make(chan string)
+		g.PlaybackDone = make(chan struct{})
+		go startPlayback(g)
+	}
+}
+
+func startPlayback(g *bot.GuildState) {
+	defer func() {
+		g.IsPlaying = false
+		g.CurrentTrack = ""
+		g.PlaybackControl = nil
+		close(g.PlaybackDone)
+		g.PlaybackDone = nil
+		fmt.Printf("[Playback] Goroutine exiting for guild %s\n", g.GuildId)
+	}()
+
+	for {
+		autoplay, _ := g.Data["autoplay"].(bool)
+		isPaused := !g.Player.IsPlaying()
+		queueSize := g.Queue.Size()
+
+		fmt.Printf("[Playback] Loop - isPaused: %v, autoplay: %v, queueSize: %d, isPlaying: %v\n",
+			isPaused, autoplay, queueSize, g.IsPlaying)
+
+		if isPaused && g.Queue.IsEmpty() && !autoplay {
+			fmt.Printf("[Playback] Exit: isPaused=%v, queueEmpty=%v, autoplay=%v\n", isPaused, g.Queue.IsEmpty(), autoplay)
+			g.IsPlaying = false
+			notifyPlaybackChanged(g, "stopped")
 			return
 		}
-		cs.G.CurrentTrack = ""
-		cs.G.IsPlaying = false
-		cs.SingleRespond("Queue está vazia, adicione mais músicas para tocar!")
-		return
+
+		if isPaused {
+			if g.Queue.IsEmpty() {
+				fmt.Printf("[Playback] Queue empty, autoplay=%v\n", autoplay)
+				if autoplay {
+					notifyPlaybackChanged(g, "autoplay")
+				}
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+
+			fmt.Printf("[Playback] Dequeue next track, queueSize before: %d\n", g.Queue.Size())
+			track, err := g.Queue.Dequeue()
+			if err != nil {
+				fmt.Printf("[Playback] Dequeue error: %v\n", err)
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+
+			g.CurrentTrack = track.Title()
+			g.IsPlaying = true
+			fmt.Printf("[Playback] Playing track: %s\n", track.Title())
+			notifyPlaybackChanged(g, "playing")
+			g.Player.PlayURLWithSeekAndVC(track.AudioURL(), 48000, 0, g.VoiceConnection)
+		}
+
+		fmt.Printf("[Playback] Waiting for Finished or Command...\n")
+		select {
+		case <-g.Player.Finished():
+			fmt.Printf("[Playback] Track finished signal received!\n")
+		case cmd := <-g.PlaybackControl:
+			fmt.Printf("[Playback] Received command: %s\n", cmd)
+			handlePlaybackCommand(g, cmd)
+		}
 	}
+}
 
-	cs.G.Player.SetOnFinishedCallback(func() {
-		playNext(cs)
-	})
-
-	track, err := cs.G.Queue.Dequeue()
-	if err != nil {
-		cs.G.CurrentTrack = ""
-		cs.G.IsPlaying = false
-		return
+func handlePlaybackCommand(g *bot.GuildState, cmd string) {
+	switch cmd {
+	case "pause":
+		g.Player.Pause()
+		g.IsPlaying = false
+		notifyPlaybackChanged(g, "paused")
+	case "resume":
+		g.Player.Resume()
+		g.IsPlaying = true
+		notifyPlaybackChanged(g, "playing")
+	case "stop":
+		g.Player.Stop()
+		g.Queue.Clear()
+		g.CurrentTrack = ""
+		g.IsPlaying = false
+		notifyPlaybackChanged(g, "stopped")
+	case "skip":
+		g.Player.Stop()
 	}
+}
 
-	cs.G.CurrentTrack = track.Title()
-	cs.G.IsPlaying = true
-	cs.G.Player.PlayURLWithSeekAndVC(track.AudioURL(), 48000, 0, cs.G.VoiceConnection)
-	cs.SingleRespond("Tocando: " + track.Title())
+func notifyPlaybackChanged(g *bot.GuildState, status string) {
 }

@@ -37,6 +37,7 @@ type DiscordPlayer struct {
 	volumeMu    sync.Mutex
 	playerMu    sync.Mutex
 	ffmpegMu    sync.Mutex
+	finished    chan struct{}
 }
 
 func NewDiscordPlayer(ffmpegPath string) (*DiscordPlayer, error) {
@@ -49,6 +50,7 @@ func NewDiscordPlayer(ffmpegPath string) (*DiscordPlayer, error) {
 		volume:      1.0,
 		ffmpegPath:  ffmpegPath,
 		opusEncoder: encoder,
+		finished:    make(chan struct{}),
 	}, nil
 }
 
@@ -166,6 +168,7 @@ func (p *DiscordPlayer) SetVoiceConnection(vc *discordgo.VoiceConnection) {
 }
 
 func (p *DiscordPlayer) PlayURLWithSeekAndVC(url string, sampleRate int, seekSeconds int, vc *discordgo.VoiceConnection) error {
+	fmt.Printf("[Audio] PlayURLWithSeekAndVC called with url: %s\n", url)
 	p.Stop()
 
 	atomic.StoreInt32(&p.stopped, 0)
@@ -241,7 +244,7 @@ func (p *DiscordPlayer) PlayURLWithSeekAndVC(url string, sampleRate int, seekSec
 		defer ffmpegReader.Close()
 		defer vc.Speaking(false)
 		defer close(p.pcmSend)
-
+		defer func() { p.finished <- struct{}{} }()
 		frameCount := 0
 		ffmpegBuf := io.Reader(ffmpegReader)
 
@@ -249,22 +252,37 @@ func (p *DiscordPlayer) PlayURLWithSeekAndVC(url string, sampleRate int, seekSec
 			audioBuf := make([]int16, frameSize*channels)
 			err := binary.Read(ffmpegBuf, binary.LittleEndian, audioBuf)
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				fmt.Printf("[Audio] io.EOF err\n")
 				break
 			}
 			if err != nil {
+				fmt.Printf("[Audio] LOOP (PlayURLWithSeekAndVC), frameCount: %d, stopped: %d\n, err: %d", frameCount, atomic.LoadInt32(&p.stopped), err)
 				continue
 			}
 
 			frameCount++
+			fmt.Printf("[Audio] LOOP (PlayURLWithSeekAndVC), frameCount: %d, stopped: %d\n", frameCount, atomic.LoadInt32(&p.stopped))
 			select {
 			case p.pcmSend <- audioBuf:
+				fmt.Printf("[Audio] pcmSend (PlayURLWithSeekAndVC), frameCount: %d, stopped: %d\n", frameCount, atomic.LoadInt32(&p.stopped))
 			case <-p.pcmClose:
+				fmt.Printf("[Audio] pcmClose (PlayURLWithSeekAndVC), frameCount: %d, stopped: %d\n", frameCount, atomic.LoadInt32(&p.stopped))
 				return
 			}
+			fmt.Printf("[Audio] OUT OF SELECT (PlayURLWithSeekAndVC), frameCount: %d, stopped: %d\n", frameCount, atomic.LoadInt32(&p.stopped))
 		}
+
+		fmt.Printf("[Audio] ffmpeg loop ended (PlayURLWithSeekAndVC), frameCount: %d, stopped: %d\n", frameCount, atomic.LoadInt32(&p.stopped))
 
 		if atomic.LoadInt32(&p.stopped) == 0 {
 			atomic.StoreInt32(&p.playing, 0)
+			fmt.Printf("[Audio] Track finished, sending finished signal\n")
+			select {
+			case p.finished <- struct{}{}:
+				fmt.Printf("[Audio] Finished signal sent\n")
+			default:
+				fmt.Printf("[Audio] Finished signal NOT sent (channel full)\n")
+			}
 			p.Stop()
 		}
 	}()
@@ -277,6 +295,11 @@ func (p *DiscordPlayer) sendPCM(vc *discordgo.VoiceConnection) {
 		recv, ok := <-p.pcmSend
 		if !ok {
 			return
+		}
+
+		if !p.IsPlaying() {
+			time.Sleep(20 * time.Millisecond)
+			continue
 		}
 
 		opus, err := p.opusEncoder.Encode(recv, frameSize, maxBytes)
@@ -309,19 +332,16 @@ func (p *DiscordPlayer) Resume() {
 }
 
 func (p *DiscordPlayer) Stop() {
-	if p.onFinished != nil {
-		callback := p.onFinished
-		p.onFinished = nil
-		callback()
-	}
+	callback := p.onFinished
+	p.onFinished = nil
 
 	atomic.StoreInt32(&p.stopped, 1)
 
+	p.ffmpegMu.Lock()
 	if p.pcmClose != nil {
 		close(p.pcmClose)
+		p.pcmClose = nil
 	}
-
-	p.ffmpegMu.Lock()
 	if p.ffmpegCmd != nil && p.ffmpegCmd.Process != nil {
 		p.ffmpegCmd.Process.Kill()
 		p.ffmpegCmd = nil
@@ -329,6 +349,9 @@ func (p *DiscordPlayer) Stop() {
 	p.ffmpegMu.Unlock()
 
 	atomic.StoreInt32(&p.playing, 0)
+	if callback != nil {
+		callback()
+	}
 }
 
 func (p *DiscordPlayer) SetVolume(volume float64) {
@@ -356,4 +379,8 @@ func (p *DiscordPlayer) IsPlaying() bool {
 
 func (p *DiscordPlayer) SetOnFinishedCallback(fn func()) {
 	p.onFinished = fn
+}
+
+func (p *DiscordPlayer) Finished() <-chan struct{} {
+	return p.finished
 }
