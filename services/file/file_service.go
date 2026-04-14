@@ -62,7 +62,7 @@ func (s *FileService) collectFiles(dir string, recursive bool) []string {
 	return files
 }
 
-func (s *FileService) Search(folders []string, query string, recursive bool) ([]domain.Track, error) {
+func (s *FileService) doSearch(folders []string, query string, recursive bool) ([]domain.Track, error) {
 	if len(folders) == 0 || query == "" {
 		return nil, nil
 	}
@@ -103,7 +103,14 @@ func (s *FileService) Search(folders []string, query string, recursive bool) ([]
 	return results, nil
 }
 
-func (s *FileService) ListAll(folders []string, recursive bool) ([]domain.Track, error) {
+func (s *FileService) Search(folders []string, query string, recursive bool, callback domain.FileServiceSearchCallback) {
+	go func() {
+		results, err := s.doSearch(folders, query, recursive)
+		callback(results, err)
+	}()
+}
+
+func (s *FileService) doListAll(folders []string, recursive bool) ([]domain.Track, error) {
 	if len(folders) == 0 {
 		return nil, nil
 	}
@@ -132,4 +139,11 @@ func (s *FileService) ListAll(folders []string, recursive bool) ([]domain.Track,
 	}
 
 	return results, nil
+}
+
+func (s *FileService) ListAll(folders []string, recursive bool, callback domain.FileServiceSearchCallback) {
+	go func() {
+		results, err := s.doListAll(folders, recursive)
+		callback(results, err)
+	}()
 }

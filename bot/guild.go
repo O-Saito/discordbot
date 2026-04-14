@@ -18,8 +18,6 @@ type GuildState struct {
 	VoiceConnection *discordgo.VoiceConnection
 	Player          *audio.DiscordPlayer
 	Manager         *Manager
-	FileService     domain.FileService
-	YouTubeService  domain.YouTubeService
 	ActiveCommands  []*discordgo.ApplicationCommand
 	mu              sync.Mutex
 }

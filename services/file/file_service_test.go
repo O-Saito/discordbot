@@ -93,12 +93,23 @@ func TestSearch(t *testing.T) {
 	os.Mkdir(subDir, 0755)
 	os.WriteFile(filepath.Join(subDir, "classical.mp3"), []byte("content"), 0644)
 
-	s := New()
+	s := &FileService{}
 
 	t.Run("empty folders returns nil", func(t *testing.T) {
-		result, err := s.Search([]string{}, "test", false)
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
+		done := make(chan bool)
+		var result []domain.Track
+		var resultErr error
+
+		s.Search([]string{}, "test", false, func(tracks []domain.Track, err error) {
+			result = tracks
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr != nil {
+			t.Errorf("unexpected error: %v", resultErr)
 		}
 		if result != nil {
 			t.Errorf("expected nil, got %v", result)
@@ -106,9 +117,20 @@ func TestSearch(t *testing.T) {
 	})
 
 	t.Run("empty query returns nil", func(t *testing.T) {
-		result, err := s.Search([]string{tmpDir}, "", false)
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
+		done := make(chan bool)
+		var result []domain.Track
+		var resultErr error
+
+		s.Search([]string{tmpDir}, "", false, func(tracks []domain.Track, err error) {
+			result = tracks
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr != nil {
+			t.Errorf("unexpected error: %v", resultErr)
 		}
 		if result != nil {
 			t.Errorf("expected nil, got %v", result)
@@ -116,9 +138,20 @@ func TestSearch(t *testing.T) {
 	})
 
 	t.Run("finds matching files", func(t *testing.T) {
-		result, err := s.Search([]string{tmpDir}, "song", false)
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
+		done := make(chan bool)
+		var result []domain.Track
+		var resultErr error
+
+		s.Search([]string{tmpDir}, "song", false, func(tracks []domain.Track, err error) {
+			result = tracks
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr != nil {
+			t.Errorf("unexpected error: %v", resultErr)
 		}
 		if len(result) != 2 {
 			t.Errorf("expected 2 results, got %d", len(result))
@@ -126,9 +159,20 @@ func TestSearch(t *testing.T) {
 	})
 
 	t.Run("case insensitive search", func(t *testing.T) {
-		result, err := s.Search([]string{tmpDir}, "MYSONG", false)
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
+		done := make(chan bool)
+		var result []domain.Track
+		var resultErr error
+
+		s.Search([]string{tmpDir}, "MYSONG", false, func(tracks []domain.Track, err error) {
+			result = tracks
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr != nil {
+			t.Errorf("unexpected error: %v", resultErr)
 		}
 		if len(result) != 1 {
 			t.Errorf("expected 1 result, got %d", len(result))
@@ -136,9 +180,20 @@ func TestSearch(t *testing.T) {
 	})
 
 	t.Run("recursive search includes subdirs", func(t *testing.T) {
-		result, err := s.Search([]string{tmpDir}, "classical", true)
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
+		done := make(chan bool)
+		var result []domain.Track
+		var resultErr error
+
+		s.Search([]string{tmpDir}, "classical", true, func(tracks []domain.Track, err error) {
+			result = tracks
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr != nil {
+			t.Errorf("unexpected error: %v", resultErr)
 		}
 		if len(result) != 1 {
 			t.Errorf("expected 1 result, got %d", len(result))
@@ -146,9 +201,20 @@ func TestSearch(t *testing.T) {
 	})
 
 	t.Run("non-recursive excludes subdirs", func(t *testing.T) {
-		result, err := s.Search([]string{tmpDir}, "classical", false)
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
+		done := make(chan bool)
+		var result []domain.Track
+		var resultErr error
+
+		s.Search([]string{tmpDir}, "classical", false, func(tracks []domain.Track, err error) {
+			result = tracks
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr != nil {
+			t.Errorf("unexpected error: %v", resultErr)
 		}
 		if len(result) != 0 {
 			t.Errorf("expected 0 results, got %d", len(result))
@@ -156,9 +222,20 @@ func TestSearch(t *testing.T) {
 	})
 
 	t.Run("search by video extension", func(t *testing.T) {
-		result, err := s.Search([]string{tmpDir}, "video", false)
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
+		done := make(chan bool)
+		var result []domain.Track
+		var resultErr error
+
+		s.Search([]string{tmpDir}, "video", false, func(tracks []domain.Track, err error) {
+			result = tracks
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr != nil {
+			t.Errorf("unexpected error: %v", resultErr)
 		}
 		if len(result) != 1 {
 			t.Errorf("expected 1 result, got %d", len(result))
@@ -180,12 +257,23 @@ func TestListAll(t *testing.T) {
 	os.Mkdir(subDir, 0755)
 	os.WriteFile(filepath.Join(subDir, "nested.mp3"), []byte("content"), 0644)
 
-	s := New()
+	s := &FileService{}
 
 	t.Run("empty folders returns nil", func(t *testing.T) {
-		result, err := s.ListAll([]string{}, false)
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
+		done := make(chan bool)
+		var result []domain.Track
+		var resultErr error
+
+		s.ListAll([]string{}, false, func(tracks []domain.Track, err error) {
+			result = tracks
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr != nil {
+			t.Errorf("unexpected error: %v", resultErr)
 		}
 		if result != nil {
 			t.Errorf("expected nil, got %v", result)
@@ -193,9 +281,20 @@ func TestListAll(t *testing.T) {
 	})
 
 	t.Run("lists all files non-recursive", func(t *testing.T) {
-		result, err := s.ListAll([]string{tmpDir}, false)
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
+		done := make(chan bool)
+		var result []domain.Track
+		var resultErr error
+
+		s.ListAll([]string{tmpDir}, false, func(tracks []domain.Track, err error) {
+			result = tracks
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr != nil {
+			t.Errorf("unexpected error: %v", resultErr)
 		}
 		if len(result) != 3 {
 			t.Errorf("expected 3 results, got %d", len(result))
@@ -203,9 +302,20 @@ func TestListAll(t *testing.T) {
 	})
 
 	t.Run("lists all files recursive", func(t *testing.T) {
-		result, err := s.ListAll([]string{tmpDir}, true)
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
+		done := make(chan bool)
+		var result []domain.Track
+		var resultErr error
+
+		s.ListAll([]string{tmpDir}, true, func(tracks []domain.Track, err error) {
+			result = tracks
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr != nil {
+			t.Errorf("unexpected error: %v", resultErr)
 		}
 		if len(result) != 4 {
 			t.Errorf("expected 4 results, got %d", len(result))

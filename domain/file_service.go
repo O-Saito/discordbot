@@ -1,8 +1,10 @@
 package domain
 
+type FileServiceSearchCallback func([]Track, error)
+
 type FileService interface {
-	Search(folders []string, query string, recursive bool) ([]Track, error)
-	ListAll(folders []string, recursive bool) ([]Track, error)
+	Search(folders []string, query string, recursive bool, callback FileServiceSearchCallback)
+	ListAll(folders []string, recursive bool, callback FileServiceSearchCallback)
 }
 
 type FileInfo struct {

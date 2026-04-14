@@ -164,16 +164,27 @@ func TestParseURL(t *testing.T) {
 		mock := &mockRunner{output: jsonOutput}
 		svc := &YouTubeService{cmdRunner: mock, binaryPath: "yt-dlp"}
 
-		track, err := svc.ParseURL(context.Background(), "https://youtube.com/watch?v=abc123")
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
+		done := make(chan bool)
+		var resultTrack domain.Track
+		var resultErr error
+
+		svc.ParseURL(context.Background(), "https://youtube.com/watch?v=abc123", func(track domain.Track, err error) {
+			resultTrack = track
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr != nil {
+			t.Errorf("unexpected error: %v", resultErr)
 		}
 
-		if track.Title() != "Test Video" {
-			t.Errorf("expected title 'Test Video', got %q", track.Title())
+		if resultTrack.Title() != "Test Video" {
+			t.Errorf("expected title 'Test Video', got %q", resultTrack.Title())
 		}
-		if track.URL() != "https://youtube.com/watch?v=abc123" {
-			t.Errorf("expected URL 'https://youtube.com/watch?v=abc123', got %q", track.URL())
+		if resultTrack.URL() != "https://youtube.com/watch?v=abc123" {
+			t.Errorf("expected URL 'https://youtube.com/watch?v=abc123', got %q", resultTrack.URL())
 		}
 	})
 
@@ -181,8 +192,17 @@ func TestParseURL(t *testing.T) {
 		mock := &mockRunner{output: "Error message", err: errors.New("command failed")}
 		svc := &YouTubeService{cmdRunner: mock, binaryPath: "yt-dlp"}
 
-		_, err := svc.ParseURL(context.Background(), "https://youtube.com/watch?v=abc123")
-		if err == nil {
+		done := make(chan bool)
+		var resultErr error
+
+		svc.ParseURL(context.Background(), "https://youtube.com/watch?v=abc123", func(track domain.Track, err error) {
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr == nil {
 			t.Error("expected error, got nil")
 		}
 	})
@@ -191,8 +211,17 @@ func TestParseURL(t *testing.T) {
 		mock := &mockRunner{output: "Not a JSON output"}
 		svc := &YouTubeService{cmdRunner: mock, binaryPath: "yt-dlp"}
 
-		_, err := svc.ParseURL(context.Background(), "https://youtube.com/watch?v=abc123")
-		if err == nil {
+		done := make(chan bool)
+		var resultErr error
+
+		svc.ParseURL(context.Background(), "https://youtube.com/watch?v=abc123", func(track domain.Track, err error) {
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr == nil {
 			t.Error("expected error, got nil")
 		}
 	})
@@ -201,12 +230,21 @@ func TestParseURL(t *testing.T) {
 		mock := &mockRunner{output: "", err: context.DeadlineExceeded}
 		svc := &YouTubeService{cmdRunner: mock, binaryPath: "yt-dlp"}
 
-		_, err := svc.ParseURL(context.Background(), "https://youtube.com/watch?v=abc123")
-		if err == nil {
+		done := make(chan bool)
+		var resultErr error
+
+		svc.ParseURL(context.Background(), "https://youtube.com/watch?v=abc123", func(track domain.Track, err error) {
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr == nil {
 			t.Error("expected error, got nil")
 		}
-		if !strings.Contains(err.Error(), "deadline") {
-			t.Errorf("expected deadline error, got %v", err)
+		if !strings.Contains(resultErr.Error(), "deadline") {
+			t.Errorf("expected deadline error, got %v", resultErr)
 		}
 	})
 }
@@ -216,13 +254,24 @@ func TestGetAudioURL(t *testing.T) {
 		mock := &mockRunner{output: "https://example.com/audio.m4a"}
 		svc := &YouTubeService{cmdRunner: mock, binaryPath: "yt-dlp"}
 
-		url, err := svc.GetAudioURL(context.Background(), "https://youtube.com/watch?v=abc123")
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
+		done := make(chan bool)
+		var resultURL string
+		var resultErr error
+
+		svc.GetAudioURL(context.Background(), "https://youtube.com/watch?v=abc123", func(url string, err error) {
+			resultURL = url
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr != nil {
+			t.Errorf("unexpected error: %v", resultErr)
 		}
 
-		if url != "https://example.com/audio.m4a" {
-			t.Errorf("expected audio URL, got %q", url)
+		if resultURL != "https://example.com/audio.m4a" {
+			t.Errorf("expected audio URL, got %q", resultURL)
 		}
 	})
 
@@ -230,8 +279,17 @@ func TestGetAudioURL(t *testing.T) {
 		mock := &mockRunner{output: ""}
 		svc := &YouTubeService{cmdRunner: mock, binaryPath: "yt-dlp"}
 
-		_, err := svc.GetAudioURL(context.Background(), "https://youtube.com/watch?v=abc123")
-		if err == nil {
+		done := make(chan bool)
+		var resultErr error
+
+		svc.GetAudioURL(context.Background(), "https://youtube.com/watch?v=abc123", func(url string, err error) {
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr == nil {
 			t.Error("expected error, got nil")
 		}
 	})
@@ -240,8 +298,17 @@ func TestGetAudioURL(t *testing.T) {
 		mock := &mockRunner{output: "", err: errors.New("command failed")}
 		svc := &YouTubeService{cmdRunner: mock, binaryPath: "yt-dlp"}
 
-		_, err := svc.GetAudioURL(context.Background(), "https://youtube.com/watch?v=abc123")
-		if err == nil {
+		done := make(chan bool)
+		var resultErr error
+
+		svc.GetAudioURL(context.Background(), "https://youtube.com/watch?v=abc123", func(url string, err error) {
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr == nil {
 			t.Error("expected error, got nil")
 		}
 	})
@@ -255,9 +322,20 @@ func TestSearch(t *testing.T) {
 		mock := &mockRunner{output: jsonOutput}
 		svc := &YouTubeService{cmdRunner: mock, binaryPath: "yt-dlp"}
 
-		results, err := svc.Search(context.Background(), "test query", 5)
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
+		done := make(chan bool)
+		var results []domain.SearchResult
+		var resultErr error
+
+		svc.Search(context.Background(), "test query", 5, func(searchResults []domain.SearchResult, err error) {
+			results = searchResults
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr != nil {
+			t.Errorf("unexpected error: %v", resultErr)
 		}
 
 		if len(results) != 2 {
@@ -279,9 +357,20 @@ func TestSearch(t *testing.T) {
 		mock := &mockRunner{output: ""}
 		svc := &YouTubeService{cmdRunner: mock, binaryPath: "yt-dlp"}
 
-		results, err := svc.Search(context.Background(), "test query", 5)
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
+		done := make(chan bool)
+		var results []domain.SearchResult
+		var resultErr error
+
+		svc.Search(context.Background(), "test query", 5, func(searchResults []domain.SearchResult, err error) {
+			results = searchResults
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr != nil {
+			t.Errorf("unexpected error: %v", resultErr)
 		}
 
 		if len(results) != 0 {
@@ -293,8 +382,17 @@ func TestSearch(t *testing.T) {
 		mock := &mockRunner{output: "", err: errors.New("command failed")}
 		svc := &YouTubeService{cmdRunner: mock, binaryPath: "yt-dlp"}
 
-		_, err := svc.Search(context.Background(), "test query", 5)
-		if err == nil {
+		done := make(chan bool)
+		var resultErr error
+
+		svc.Search(context.Background(), "test query", 5, func(results []domain.SearchResult, err error) {
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr == nil {
 			t.Error("expected error, got nil")
 		}
 	})
@@ -308,9 +406,20 @@ func TestParsePlaylist(t *testing.T) {
 		mock := &mockRunner{output: jsonOutput}
 		svc := &YouTubeService{cmdRunner: mock, binaryPath: "yt-dlp"}
 
-		tracks, err := svc.ParsePlaylist(context.Background(), "https://youtube.com/playlist?list=PL123")
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
+		done := make(chan bool)
+		var tracks []domain.Track
+		var resultErr error
+
+		svc.ParsePlaylist(context.Background(), "https://youtube.com/playlist?list=PL123", func(resultTracks []domain.Track, err error) {
+			tracks = resultTracks
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr != nil {
+			t.Errorf("unexpected error: %v", resultErr)
 		}
 
 		if len(tracks) != 2 {
@@ -329,8 +438,17 @@ func TestParsePlaylist(t *testing.T) {
 		mock := &mockRunner{output: "", err: errors.New("command failed")}
 		svc := &YouTubeService{cmdRunner: mock, binaryPath: "yt-dlp"}
 
-		_, err := svc.ParsePlaylist(context.Background(), "https://youtube.com/playlist?list=PL123")
-		if err == nil {
+		done := make(chan bool)
+		var resultErr error
+
+		svc.ParsePlaylist(context.Background(), "https://youtube.com/playlist?list=PL123", func(tracks []domain.Track, err error) {
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr == nil {
 			t.Error("expected error, got nil")
 		}
 	})
@@ -339,12 +457,21 @@ func TestParsePlaylist(t *testing.T) {
 		mock := &mockRunner{output: "", err: context.DeadlineExceeded}
 		svc := &YouTubeService{cmdRunner: mock, binaryPath: "yt-dlp"}
 
-		_, err := svc.ParsePlaylist(context.Background(), "https://youtube.com/playlist?list=PL123")
-		if err == nil {
+		done := make(chan bool)
+		var resultErr error
+
+		svc.ParsePlaylist(context.Background(), "https://youtube.com/playlist?list=PL123", func(tracks []domain.Track, err error) {
+			resultErr = err
+			done <- true
+		})
+
+		<-done
+
+		if resultErr == nil {
 			t.Error("expected error, got nil")
 		}
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Errorf("expected DeadlineExceeded error, got %v", err)
+		if !errors.Is(resultErr, context.DeadlineExceeded) {
+			t.Errorf("expected DeadlineExceeded error, got %v", resultErr)
 		}
 	})
 }

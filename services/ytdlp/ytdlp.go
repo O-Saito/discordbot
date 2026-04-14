@@ -66,72 +66,84 @@ func findFirstJSONLine(output string) string {
 	return ""
 }
 
-func (s *YouTubeService) ParseURL(ctx context.Context, url string) (domain.Track, error) {
-	output, err := s.cmdRunner.Run(ctx, s.binaryPath,
-		"--no-warnings",
-		"--skip-download",
-		"--dump-json",
-		url)
-	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return domain.Track{}, fmt.Errorf("timeout: %w", ctx.Err())
+func (s *YouTubeService) ParseURL(ctx context.Context, url string, callback domain.YouTubeServiceCallback) {
+	go func() {
+		output, err := s.cmdRunner.Run(ctx, s.binaryPath,
+			"--no-warnings",
+			"--skip-download",
+			"--dump-json",
+			url)
+		if err != nil {
+			if ctx.Err() == context.DeadlineExceeded {
+				callback(domain.Track{}, fmt.Errorf("timeout: %w", ctx.Err()))
+				return
+			}
+
+			jsonLine := findFirstJSONLine(output)
+			if jsonLine == "" {
+				errMsg := strings.TrimSpace(output)
+				if errMsg == "" {
+					errMsg = err.Error()
+				}
+				callback(domain.Track{}, fmt.Errorf("yt-dlp error: %s", errMsg))
+				return
+			}
+
+			callback(domain.Track{}, fmt.Errorf("failed to execute yt-dlp: %w", err))
+			return
 		}
 
 		jsonLine := findFirstJSONLine(output)
 		if jsonLine == "" {
+			callback(domain.Track{}, fmt.Errorf("no valid JSON in yt-dlp output: %s", output))
+			return
+		}
+
+		var video ytDlpVideo
+		if err := json.Unmarshal([]byte(jsonLine), &video); err != nil {
+			callback(domain.Track{}, fmt.Errorf("failed to parse json: %w", err))
+			return
+		}
+
+		callback(domain.NewTrackFromYouTube(
+			video.WebpageURL,
+			video.Title,
+			video.Description,
+			"",
+		), nil)
+	}()
+}
+
+func (s *YouTubeService) GetAudioURL(ctx context.Context, url string, callback func(string, error)) {
+	go func() {
+		output, err := s.cmdRunner.Run(ctx, s.binaryPath,
+			"--no-warnings",
+			"--skip-download",
+			"--get-url",
+			"-f", "bestaudio",
+			url)
+		if err != nil {
+			if ctx.Err() == context.DeadlineExceeded {
+				callback("", fmt.Errorf("timeout: %w", ctx.Err()))
+				return
+			}
+
 			errMsg := strings.TrimSpace(output)
 			if errMsg == "" {
 				errMsg = err.Error()
 			}
-			return domain.Track{}, fmt.Errorf("yt-dlp error: %s", errMsg)
+			callback("", fmt.Errorf("yt-dlp error: %s", errMsg))
+			return
 		}
 
-		return domain.Track{}, fmt.Errorf("failed to execute yt-dlp: %w", err)
-	}
-
-	jsonLine := findFirstJSONLine(output)
-	if jsonLine == "" {
-		return domain.Track{}, fmt.Errorf("no valid JSON in yt-dlp output: %s", output)
-	}
-
-	var video ytDlpVideo
-	if err := json.Unmarshal([]byte(jsonLine), &video); err != nil {
-		return domain.Track{}, fmt.Errorf("failed to parse json: %w", err)
-	}
-
-	return domain.NewTrackFromYouTube(
-		video.WebpageURL,
-		video.Title,
-		video.Description,
-		"",
-	), nil
-}
-
-func (s *YouTubeService) GetAudioURL(ctx context.Context, url string) (string, error) {
-	output, err := s.cmdRunner.Run(ctx, s.binaryPath,
-		"--no-warnings",
-		"--skip-download",
-		"--get-url",
-		"-f", "bestaudio",
-		url)
-	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("timeout: %w", ctx.Err())
+		output = strings.TrimSpace(output)
+		if output == "" {
+			callback("", fmt.Errorf("no audio URL returned"))
+			return
 		}
 
-		errMsg := strings.TrimSpace(output)
-		if errMsg == "" {
-			errMsg = err.Error()
-		}
-		return "", fmt.Errorf("yt-dlp error: %s", errMsg)
-	}
-
-	output = strings.TrimSpace(output)
-	if output == "" {
-		return "", fmt.Errorf("no audio URL returned")
-	}
-
-	return output, nil
+		callback(output, nil)
+	}()
 }
 
 func durationToString(d interface{}) string {
@@ -148,95 +160,104 @@ func durationToString(d interface{}) string {
 	}
 }
 
-func (s *YouTubeService) Search(ctx context.Context, query string, maxResults int) ([]domain.SearchResult, error) {
-	output, err := s.cmdRunner.Run(ctx, s.binaryPath,
-		"--no-warnings",
-		"--no-playlist",
-		"--no-check-certificate",
-		"--geo-bypass",
-		"--flat-playlist",
-		"--skip-download",
-		"--dump-json",
-		fmt.Sprintf("ytsearch%d:%s", maxResults, query))
-	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return nil, fmt.Errorf("timeout: %w", ctx.Err())
-		}
-
-		jsonLine := findFirstJSONLine(output)
-		if jsonLine == "" {
-			errMsg := strings.TrimSpace(output)
-			if errMsg == "" {
-				errMsg = err.Error()
+func (s *YouTubeService) Search(ctx context.Context, query string, maxResults int, callback domain.YouTubeServiceSearchCallback) {
+	go func() {
+		output, err := s.cmdRunner.Run(ctx, s.binaryPath,
+			"--no-warnings",
+			"--no-playlist",
+			"--no-check-certificate",
+			"--geo-bypass",
+			"--flat-playlist",
+			"--skip-download",
+			"--dump-json",
+			fmt.Sprintf("ytsearch%d:%s", maxResults, query))
+		if err != nil {
+			if ctx.Err() == context.DeadlineExceeded {
+				callback(nil, fmt.Errorf("timeout: %w", ctx.Err()))
+				return
 			}
-			return nil, fmt.Errorf("yt-dlp error: %s", errMsg)
+
+			jsonLine := findFirstJSONLine(output)
+			if jsonLine == "" {
+				errMsg := strings.TrimSpace(output)
+				if errMsg == "" {
+					errMsg = err.Error()
+				}
+				callback(nil, fmt.Errorf("yt-dlp error: %s", errMsg))
+				return
+			}
+
+			callback(nil, fmt.Errorf("failed to execute yt-dlp: %w", err))
+			return
 		}
 
-		return nil, fmt.Errorf("failed to execute yt-dlp: %w", err)
-	}
+		lines := strings.Split(strings.TrimSpace(output), "\n")
+		results := make([]domain.SearchResult, 0, len(lines))
 
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	results := make([]domain.SearchResult, 0, len(lines))
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
 
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+			var video ytDlpVideo
+			if err := json.Unmarshal([]byte(line), &video); err != nil {
+				continue
+			}
+
+			results = append(results, domain.SearchResult{
+				Title:    video.Title,
+				URL:      video.WebpageURL,
+				Duration: durationToString(video.Duration),
+			})
 		}
 
-		var video ytDlpVideo
-		if err := json.Unmarshal([]byte(line), &video); err != nil {
-			continue
-		}
-
-		results = append(results, domain.SearchResult{
-			Title:    video.Title,
-			URL:      video.WebpageURL,
-			Duration: durationToString(video.Duration),
-		})
-	}
-
-	return results, nil
+		callback(results, nil)
+	}()
 }
 
-func (s *YouTubeService) ParsePlaylist(ctx context.Context, url string) ([]domain.Track, error) {
-	output, err := s.cmdRunner.Run(ctx, s.binaryPath,
-		"--no-warnings",
-		"--flat-playlist",
-		"--skip-download",
-		"--dump-json",
-		url)
-	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return nil, fmt.Errorf("timeout: %w", ctx.Err())
+func (s *YouTubeService) ParsePlaylist(ctx context.Context, url string, callback domain.YouTubeServicePlaylistCallback) {
+	go func() {
+		output, err := s.cmdRunner.Run(ctx, s.binaryPath,
+			"--no-warnings",
+			"--flat-playlist",
+			"--skip-download",
+			"--dump-json",
+			url)
+		if err != nil {
+			if ctx.Err() == context.DeadlineExceeded {
+				callback(nil, fmt.Errorf("timeout: %w", ctx.Err()))
+				return
+			}
+
+			callback(nil, fmt.Errorf("failed to execute yt-dlp: %w", err))
+			return
 		}
 
-		return nil, fmt.Errorf("failed to execute yt-dlp: %w", err)
-	}
+		lines := strings.Split(strings.TrimSpace(output), "\n")
+		tracks := make([]domain.Track, 0, len(lines))
 
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	tracks := make([]domain.Track, 0, len(lines))
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
 
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+			var video ytDlpVideo
+			if err := json.Unmarshal([]byte(line), &video); err != nil {
+				continue
+			}
+
+			tracks = append(tracks, domain.NewTrackFromYouTube(
+				video.WebpageURL,
+				video.Title,
+				video.Description,
+				"",
+			))
 		}
 
-		var video ytDlpVideo
-		if err := json.Unmarshal([]byte(line), &video); err != nil {
-			continue
-		}
-
-		tracks = append(tracks, domain.NewTrackFromYouTube(
-			video.WebpageURL,
-			video.Title,
-			video.Description,
-			"",
-		))
-	}
-
-	return tracks, nil
+		callback(tracks, nil)
+	}()
 }
 
 type ytDlpVideo struct {
