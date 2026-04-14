@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"mydiscordbot/bot"
+	"mydiscordbot/domain"
+	"mydiscordbot/services/file"
+	"mydiscordbot/services/ytdlp"
 	"strings"
 
 	"github.com/bwmarrin/discordgo"
@@ -35,18 +38,20 @@ func (c *AddCommand) GetApplicationCommand() *discordgo.ApplicationCommand {
 	}
 }
 
-func (c *AddCommand) Execute(g *bot.GuildState, s *discordgo.Session, args *map[string]any) error {
+func (c *AddCommand) Execute(cs *bot.CommandState) error {
+	args := cs.Args
 	if args == nil || len(*args) == 0 {
+		cs.SingleRespond("Parametro query não informado!")
 		return fmt.Errorf("usage: add <url or search query>")
 	}
 
 	arg := (*args)["query"].(string)
 
 	if isYouTubeURL(arg) {
-		return addURL(g, s, arg)
+		return addURL(cs, arg)
 	}
 
-	return searchAndAdd(g, s, arg)
+	return searchAndAdd(cs, arg)
 }
 
 func isYouTubeURL(input string) bool {
@@ -84,147 +89,174 @@ func stripPlaylistParam(url string) string {
 	return url
 }
 
-func addURL(g *bot.GuildState, s *discordgo.Session, url string) error {
+func addURL(cs *bot.CommandState, url string) error {
+	s := cs.S
+	g := cs.G
 	if hasPlaylistParam(url) {
-		s.ChannelMessageSend("", "This URL contains a playlist, adding all tracks...")
+		cs.SingleRespond(fmt.Sprintf("A busca %s contem uma playlist adicionando todos...", url))
 
-		tracks, err := g.YouTubeService.ParsePlaylist(context.Background(), url)
-		if err != nil {
-			return fmt.Errorf("failed to fetch playlist: %w", err)
-		}
-
-		s.ChannelMessageSend("", fmt.Sprintf("Adding %d tracks:", len(tracks)))
-		for _, track := range tracks {
-			err := g.Queue.Enqueue(track)
+		ytSvc := ytdlp.New()
+		ytSvc.ParsePlaylist(context.Background(), url, func(tracks []domain.Track, err error) {
 			if err != nil {
-				return fmt.Errorf("failed to add to queue: %w", err)
+				s.ChannelMessageSend("", "Failed to fetch playlist: "+err.Error())
+				return
 			}
-		}
-		s.ChannelMessageSend("", "Playlist added!")
 
-		if !g.IsPlaying {
-			playNext(g, s)
-		}
+			s.ChannelMessageSend("", fmt.Sprintf("Adding %d tracks:", len(tracks)))
+			for _, track := range tracks {
+				err := g.Queue.Enqueue(track)
+				if err != nil {
+					s.ChannelMessageSend("", "Failed to add to queue: "+err.Error())
+					return
+				}
+			}
+			s.ChannelMessageSend("", "Playlist added!")
+
+			if !g.IsPlaying {
+				playNext(cs)
+			}
+		})
 		return nil
 	}
 
 	url = stripPlaylistParam(url)
 
-	s.ChannelMessageSend("", "Fetching track...")
+	cs.SingleRespond(fmt.Sprintf("Buscando por: %s", url))
 
-	track, err := g.YouTubeService.ParseURL(context.Background(), url)
-	if err != nil {
-		return fmt.Errorf("failed to fetch track: %w", err)
-	}
+	ytSvc := ytdlp.New()
+	ytSvc.ParseURL(context.Background(), url, func(track domain.Track, err error) {
+		if err != nil {
+			cs.SingleRespond(fmt.Sprintf("Falha ao buscar track %s: %s", url, err.Error()))
+			return
+		}
 
-	audioURL, err := g.YouTubeService.GetAudioURL(context.Background(), url)
-	if err != nil {
-		return fmt.Errorf("failed to get audio URL: %w", err)
-	}
-	track.SetAudioURL(audioURL)
+		ytSvc.GetAudioURL(context.Background(), url, func(audioURL string, err error) {
+			if err != nil {
+				cs.SingleRespond(fmt.Sprintf("Falha ao buscar audio de %s: %s", url, err.Error()))
+				return
+			}
+			track.SetAudioURL(audioURL)
 
-	err = g.Queue.Enqueue(track)
-	if err != nil {
-		return fmt.Errorf("failed to add to queue: %w", err)
-	}
+			err = cs.G.Queue.Enqueue(track)
+			if err != nil {
+				cs.SingleRespond(fmt.Sprintf("Falha ao adicionar %s na queue: %s", url, err.Error()))
+				return
+			}
 
-	s.ChannelMessageSend("", "Added: "+track.Title())
+			cs.SingleRespond(fmt.Sprintf("%s adicionado a queue", track.Title()))
 
-	if !g.IsPlaying {
-		playNext(g, s)
-	}
+			if !cs.G.IsPlaying {
+				playNext(cs)
+			}
+		})
+	})
 
 	return nil
 }
 
-func searchAndAdd(g *bot.GuildState, s *discordgo.Session, query string) error {
+func searchAndAdd(cs *bot.CommandState, query string) error {
+	g := cs.G
 	musicFolders := g.Manager.MusicFolders()
 	recursive := g.Manager.RecursiveSearch()
 
-	fileResults, err := g.FileService.Search(musicFolders, query, recursive)
-	if err != nil {
-		return fmt.Errorf("file search failed: %w", err)
-	}
-
-	if len(fileResults) > 0 {
-		track := fileResults[0]
-		err := g.Queue.Enqueue(track)
+	fileSvc := file.New()
+	fileSvc.Search(musicFolders, query, recursive, func(fileResults []domain.Track, err error) {
 		if err != nil {
-			return fmt.Errorf("failed to add to queue: %w", err)
+			cs.SingleRespond("Falha na busca de arquivos: " + err.Error())
+			return
 		}
 
-		s.ChannelMessageSend("", "Added: "+track.Title())
+		if len(fileResults) > 0 {
+			track := fileResults[0]
+			err := g.Queue.Enqueue(track)
+			if err != nil {
+				cs.SingleRespond("Falha ao adicionar à queue: " + err.Error())
+				return
+			}
 
-		if !g.IsPlaying {
-			playNext(g, s)
+			cs.SingleRespond("Adicionado: " + track.Title())
+
+			if !cs.G.IsPlaying {
+				playNext(cs)
+			}
+
+			return
 		}
 
-		return nil
-	}
-
-	return searchAndAddYouTube(g, s, query)
-}
-
-func searchAndAddYouTube(g *bot.GuildState, s *discordgo.Session, query string) error {
-	s.ChannelMessageSend("", "Searching YouTube...")
-
-	results, err := g.YouTubeService.Search(context.Background(), query, 5)
-	if err != nil {
-		return fmt.Errorf("search failed: %w", err)
-	}
-
-	if len(results) == 0 {
-		s.ChannelMessageSend("", "No results found")
-		return nil
-	}
-
-	result := results[0]
-	track, err := g.YouTubeService.ParseURL(context.Background(), result.URL)
-	if err != nil {
-		return fmt.Errorf("failed to parse URL: %w", err)
-	}
-
-	audioURL, err := g.YouTubeService.GetAudioURL(context.Background(), result.URL)
-	if err != nil {
-		return fmt.Errorf("failed to get audio URL: %w", err)
-	}
-	track.SetAudioURL(audioURL)
-
-	err = g.Queue.Enqueue(track)
-	if err != nil {
-		return fmt.Errorf("failed to add to queue: %w", err)
-	}
-
-	s.ChannelMessageSend("", "Added: "+track.Title())
-
-	if !g.IsPlaying {
-		playNext(g, s)
-	}
+		searchAndAddYouTube(cs, query)
+	})
 
 	return nil
 }
 
-func playNext(g *bot.GuildState, s *discordgo.Session) {
-	if g.Queue.IsEmpty() {
-		g.CurrentTrack = ""
-		g.IsPlaying = false
-		s.ChannelMessageSend("", "Queue is empty")
-		return
-	}
+func searchAndAddYouTube(cs *bot.CommandState, query string) error {
+	cs.SingleRespond("Buscando no YouTube...")
 
-	g.Player.SetOnFinishedCallback(func() {
-		playNext(g, s)
+	ytSvc := ytdlp.New()
+	ytSvc.Search(context.Background(), query, 5, func(results []domain.SearchResult, err error) {
+		if err != nil {
+			cs.SingleRespond("Falha na busca: " + err.Error())
+			return
+		}
+
+		if len(results) == 0 {
+			cs.SingleRespond("Nenhum resultado encontrado")
+			return
+		}
+
+		result := results[0]
+		ytSvc.ParseURL(context.Background(), result.URL, func(track domain.Track, err error) {
+			if err != nil {
+				cs.SingleRespond("Falha ao analisar URL: " + err.Error())
+				return
+			}
+
+			ytSvc.GetAudioURL(context.Background(), result.URL, func(audioURL string, err error) {
+				if err != nil {
+					cs.SingleRespond("Falha ao buscar URL do áudio: " + err.Error())
+					return
+				}
+				track.SetAudioURL(audioURL)
+
+				err = cs.G.Queue.Enqueue(track)
+				if err != nil {
+					cs.SingleRespond("Falha ao adicionar à queue: " + err.Error())
+					return
+				}
+
+				cs.SingleRespond("Adicionado: " + track.Title())
+
+				if !cs.G.IsPlaying {
+					playNext(cs)
+				}
+			})
+		})
 	})
 
-	track, err := g.Queue.Dequeue()
-	if err != nil {
-		g.CurrentTrack = ""
-		g.IsPlaying = false
+	return nil
+}
+
+func playNext(cs *bot.CommandState) {
+	if cs.G.Queue.IsEmpty() {
+		cs.G.CurrentTrack = ""
+		cs.G.IsPlaying = false
+		cs.SingleRespond("Queue está vazia, adicione mais músicas para tocar!")
 		return
 	}
 
-	g.CurrentTrack = track.Title()
-	g.IsPlaying = true
-	g.Player.PlayURLWithSeekAndVC(track.AudioURL(), 48000, 0, g.VoiceConnection)
-	s.ChannelMessageSend("", "Playing: "+track.Title())
+	cs.G.Player.SetOnFinishedCallback(func() {
+		playNext(cs)
+	})
+
+	track, err := cs.G.Queue.Dequeue()
+	if err != nil {
+		cs.G.CurrentTrack = ""
+		cs.G.IsPlaying = false
+		return
+	}
+
+	cs.G.CurrentTrack = track.Title()
+	cs.G.IsPlaying = true
+	cs.G.Player.PlayURLWithSeekAndVC(track.AudioURL(), 48000, 0, cs.G.VoiceConnection)
+	cs.SingleRespond("Tocando: " + track.Title())
 }

@@ -122,8 +122,6 @@ func (m *Manager) GetGuildState(guildID string) *GuildState {
 		Volume:         100,
 		Player:         player,
 		Manager:        m,
-		FileService:    file.New(),
-		YouTubeService: ytdlp.New(),
 		ActiveCommands: make([]*discordgo.ApplicationCommand, len(commands)),
 	}
 
@@ -277,13 +275,27 @@ func (m *Manager) onInteractionCreate(s *discordgo.Session, i *discordgo.Interac
 
 	cmd := GetCommand(i.ApplicationCommandData().Name)
 	if cmd == nil {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "Comando não encontrado",
+			},
+		})
 		fmt.Printf("%s command not found\n", i.ApplicationCommandData().Name)
 		return
-
 	}
 
+	CommandState := &CommandState{
+		G:    state,
+		S:    s,
+		I:    i,
+		Args: cmd.ParseInteraction(i),
+	}
+
+	CommandState.SingleRespond(fmt.Sprintf("Executando o comando %s", i.ApplicationCommandData().Name))
 	fmt.Printf("Executing %s command\n", i.ApplicationCommandData().Name)
-	cmd.Execute(state, s, cmd.ParseInteraction(i))
+
+	cmd.Execute(CommandState)
 }
 
 func (m *Manager) handleVoiceJoin(state *GuildState, channelID string) {
@@ -314,43 +326,78 @@ func (m *Manager) handlePlayCommand(s *discordgo.Session, channelID, guildID, qu
 
 	if len(m.config.MusicFolders) > 0 {
 		fileSvc := file.New()
-		results, err := fileSvc.Search(m.config.MusicFolders, query, m.config.RecursiveSearch)
-		if err == nil && len(results) > 0 {
-			state.Queue.Enqueue(results[0])
-			s.ChannelMessageSend(channelID, "Added to queue: "+results[0].Title())
-			if !state.IsPlaying {
-				m.Play(guildID)
+		fileSvc.Search(m.config.MusicFolders, query, m.config.RecursiveSearch, func(results []domain.Track, err error) {
+			if err == nil && len(results) > 0 {
+				state.Queue.Enqueue(results[0])
+				s.ChannelMessageSend(channelID, "Added to queue: "+results[0].Title())
+				if !state.IsPlaying {
+					m.Play(guildID)
+				}
+				return
 			}
-			return
-		}
+
+			ytSvc := ytdlp.New()
+			ytSvc.Search(context.Background(), query, 5, func(results []domain.SearchResult, err error) {
+				if err != nil || len(results) == 0 {
+					s.ChannelMessageSend(channelID, "No results found")
+					return
+				}
+
+				ytSvc.ParseURL(context.Background(), results[0].URL, func(track domain.Track, err error) {
+					if err != nil {
+						s.ChannelMessageSend(channelID, "Error parsing URL: "+err.Error())
+						return
+					}
+
+					ytSvc.GetAudioURL(context.Background(), results[0].URL, func(audioURL string, err error) {
+						if err != nil {
+							s.ChannelMessageSend(channelID, "Error getting audio URL: "+err.Error())
+							return
+						}
+
+						track.SetAudioURL(audioURL)
+						state.Queue.Enqueue(track)
+						s.ChannelMessageSend(channelID, "Added to queue: "+track.Title())
+
+						if !state.IsPlaying {
+							m.Play(guildID)
+						}
+					})
+				})
+			})
+		})
+		return
 	}
 
 	ytSvc := ytdlp.New()
-	results, err := ytSvc.Search(context.Background(), query, 5)
-	if err != nil || len(results) == 0 {
-		s.ChannelMessageSend(channelID, "No results found")
-		return
-	}
+	ytSvc.Search(context.Background(), query, 5, func(results []domain.SearchResult, err error) {
+		if err != nil || len(results) == 0 {
+			s.ChannelMessageSend(channelID, "No results found")
+			return
+		}
 
-	track, err := ytSvc.ParseURL(context.Background(), results[0].URL)
-	if err != nil {
-		s.ChannelMessageSend(channelID, "Error parsing URL: "+err.Error())
-		return
-	}
+		ytSvc.ParseURL(context.Background(), results[0].URL, func(track domain.Track, err error) {
+			if err != nil {
+				s.ChannelMessageSend(channelID, "Error parsing URL: "+err.Error())
+				return
+			}
 
-	audioURL, err := ytSvc.GetAudioURL(context.Background(), results[0].URL)
-	if err != nil {
-		s.ChannelMessageSend(channelID, "Error getting audio URL: "+err.Error())
-		return
-	}
+			ytSvc.GetAudioURL(context.Background(), results[0].URL, func(audioURL string, err error) {
+				if err != nil {
+					s.ChannelMessageSend(channelID, "Error getting audio URL: "+err.Error())
+					return
+				}
 
-	track.SetAudioURL(audioURL)
-	state.Queue.Enqueue(track)
-	s.ChannelMessageSend(channelID, "Added to queue: "+track.Title())
+				track.SetAudioURL(audioURL)
+				state.Queue.Enqueue(track)
+				s.ChannelMessageSend(channelID, "Added to queue: "+track.Title())
 
-	if !state.IsPlaying {
-		m.Play(guildID)
-	}
+				if !state.IsPlaying {
+					m.Play(guildID)
+				}
+			})
+		})
+	})
 }
 
 func (m *Manager) AddToQueue(guildID string, track domain.Track) {
