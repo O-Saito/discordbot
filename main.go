@@ -11,6 +11,7 @@ import (
 func main() {
 
 	bot.RegisterCommand(&commands.AddCommand{})
+	bot.RegisterCommand(&commands.MusicCommand{})
 
 	manager, err := bot.NewManager(config.NewConfig())
 	if err != nil {
