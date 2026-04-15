@@ -37,7 +37,6 @@ func BuildListPageComponents(tracks []domain.Track, page, totalPages int) (*disc
 		}
 		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
 			Name:   fmt.Sprintf("%d. %s", idx+1, title),
-			Value:  "🎵",
 			Inline: false,
 		})
 	}
@@ -55,19 +54,22 @@ func BuildListPageComponents(tracks []domain.Track, page, totalPages int) (*disc
 	}
 
 	minVals := 1
-	components := []discordgo.MessageComponent{
-		discordgo.ActionsRow{
-			Components: []discordgo.MessageComponent{
-				discordgo.SelectMenu{
-					CustomID:    fmt.Sprintf("%s_select_%d", MusicPrefix, page),
-					MinValues:   &minVals,
-					MaxValues:   1,
-					Options:     selectOptions,
-					Placeholder: "Select a track to add to queue...",
-				},
+	var components []discordgo.MessageComponent
+
+	components = append(components, discordgo.ActionsRow{
+		Components: []discordgo.MessageComponent{
+			discordgo.SelectMenu{
+				CustomID:    fmt.Sprintf("%s_select_%d", MusicPrefix, page),
+				MinValues:   &minVals,
+				MaxValues:   1,
+				Options:     selectOptions,
+				Placeholder: "Select a track to add to queue...",
 			},
 		},
-		discordgo.ActionsRow{
+	})
+
+	if totalPages > 1 {
+		components = append(components, discordgo.ActionsRow{
 			Components: []discordgo.MessageComponent{
 				discordgo.Button{
 					Label:    "◀",
@@ -82,7 +84,7 @@ func BuildListPageComponents(tracks []domain.Track, page, totalPages int) (*disc
 					Disabled: page >= totalPages-1,
 				},
 			},
-		},
+		})
 	}
 
 	return embed, components
@@ -172,4 +174,92 @@ func ParseListSelectAction(customID string) (page, trackIndex int, ok bool) {
 
 	fmt.Printf("[ParseListSelectAction] page=%d, trackIndex=%d\n", page, trackIdx)
 	return page, trackIdx, true
+}
+
+func ParseQueueAction(customID string) (page int, ok bool) {
+	if !strings.HasPrefix(customID, "queue_") {
+		return 0, false
+	}
+
+	action := strings.TrimPrefix(customID, "queue_")
+
+	if strings.HasPrefix(action, "prev_") {
+		p, err := strconv.Atoi(strings.TrimPrefix(action, "prev_"))
+		if err != nil {
+			return 0, false
+		}
+		return p - 1, true
+	}
+
+	if strings.HasPrefix(action, "next_") {
+		p, err := strconv.Atoi(strings.TrimPrefix(action, "next_"))
+		if err != nil {
+			return 0, false
+		}
+		return p + 1, true
+	}
+
+	return 0, false
+}
+
+func BuildQueuePageComponents(tracks []domain.Track, currentTrack string, page, totalPages int) (*discordgo.MessageEmbed, []discordgo.MessageComponent) {
+	start := page * TracksPerPage
+	end := start + TracksPerPage
+	if end > len(tracks) {
+		end = len(tracks)
+	}
+
+	embed := &discordgo.MessageEmbed{
+		Title:       "🎵 Music Queue",
+		Description: fmt.Sprintf("Page %d of %d", page+1, totalPages),
+		Color:       TrackBlue,
+		Fields:      []*discordgo.MessageEmbedField{},
+	}
+
+	if currentTrack != "" {
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+			Name:  "Now Playing",
+			Value: currentTrack,
+		})
+	}
+
+	embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+		Name:   "Up Next",
+		Value:  "─────────────────────",
+		Inline: false,
+	})
+
+	for i := start; i < end && i < len(tracks); i++ {
+		trackNum := i + 1
+		title := tracks[i].Title()
+		if len(title) > 100 {
+			title = title[:97] + "..."
+		}
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{
+			Name:   fmt.Sprintf("%d. %s", trackNum, title),
+			Inline: false,
+		})
+	}
+
+	var components []discordgo.MessageComponent
+	if totalPages > 1 {
+		components = append(components, discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.Button{
+					Label:    "◀",
+					Style:    discordgo.SecondaryButton,
+					CustomID: fmt.Sprintf("queue_prev_%d", page),
+					Disabled: page == 0,
+				},
+				discordgo.Button{
+					Label:    "▶",
+					Style:    discordgo.SecondaryButton,
+					CustomID: fmt.Sprintf("queue_next_%d", page),
+					Disabled: page >= totalPages-1,
+				},
+			},
+		})
+	}
+
+	return embed, components
 }

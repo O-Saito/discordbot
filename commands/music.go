@@ -42,6 +42,33 @@ func (c *MusicCommand) HandleButton(cs *bot.CommandState, customID string) error
 	musicFolders := cs.G.Manager.MusicFolders()
 	recursive := cs.G.Manager.RecursiveSearch()
 
+	queuePage, queueOk := discord_helper.ParseQueueAction(customID)
+	if queueOk {
+		channelID := cs.I.ChannelID
+		messageID := cs.I.Message.ID
+
+		queueTracks := cs.G.Queue.All()
+		currentTrack := cs.G.CurrentTrack
+
+		totalPages := (len(queueTracks) + 9) / 10
+		if totalPages == 0 {
+			totalPages = 1
+		}
+
+		embed, buttons := discord_helper.BuildQueuePageComponents(queueTracks, currentTrack, queuePage, totalPages)
+
+		_, editErr := cs.S.ChannelMessageEditComplex(&discordgo.MessageEdit{
+			Channel:    channelID,
+			ID:         messageID,
+			Embed:      embed,
+			Components: &buttons,
+		})
+		if editErr != nil {
+			fmt.Printf("[Music HandleButton] Queue edit error: %v\n", editErr)
+		}
+		return nil
+	}
+
 	page, ok := discord_helper.ParseListPageAction(customID)
 	if !ok {
 		fmt.Printf("[Music HandleButton] Failed to parse customID=%s\n", customID)
@@ -118,7 +145,15 @@ func (c *MusicCommand) HandleSelectMenu(cs *bot.CommandState, customID string, v
 
 		ensurePlaybackGoroutine(cs)
 
-		cs.SingleRespond(fmt.Sprintf("Added to queue: %s", track.Title()))
+		channelID := cs.I.ChannelID
+		embed := &discordgo.MessageEmbed{
+			Title:       "Added to queue",
+			Description: track.Title(),
+			Color:       0x2ecc71,
+		}
+		cs.S.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+			Embed: embed,
+		})
 	})
 
 	return nil
@@ -307,31 +342,23 @@ func handleSkip(cs *bot.CommandState, opts *map[string]any) error {
 }
 
 func handleQueue(cs *bot.CommandState, opts *map[string]any) error {
-	size := cs.G.Queue.Size()
+	queueTracks := cs.G.Queue.All()
+	currentTrack := cs.G.CurrentTrack
 
-	var msg string
-
-	if cs.G.CurrentTrack != "" {
-		if size > 0 {
-			msg = fmt.Sprintf("Now playing: %s\n\nQueue (%d):\n", cs.G.CurrentTrack, size)
-		} else {
-			msg = fmt.Sprintf("Now playing: %s\n\nQueue is empty", cs.G.CurrentTrack)
-		}
-	} else if size == 0 {
-		cs.SingleRespond("Queue is empty")
-		return nil
-	} else {
-		msg = fmt.Sprintf("Queue (%d):\n", size)
+	totalPages := (len(queueTracks) + 9) / 10
+	if totalPages == 0 {
+		totalPages = 1
 	}
 
-	if size > 0 {
-		items := cs.G.Queue.All()
-		for i, track := range items {
-			msg += fmt.Sprintf("%d. %s\n", i+1, track.Title())
-		}
-	}
+	channelID := cs.I.ChannelID
 
-	cs.SingleRespond(msg)
+	embed, buttons := discord_helper.BuildQueuePageComponents(queueTracks, currentTrack, 0, totalPages)
+
+	cs.S.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+		Embed:      embed,
+		Components: buttons,
+	})
+
 	return nil
 }
 
