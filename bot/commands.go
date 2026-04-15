@@ -2,7 +2,9 @@ package bot
 
 import (
 	"sort"
+	"sync"
 
+	"github.com/disgoorg/disgo/bot"
 	"github.com/disgoorg/disgo/discord"
 	"github.com/disgoorg/disgo/events"
 	"github.com/disgoorg/snowflake/v2"
@@ -10,91 +12,107 @@ import (
 
 type CommandState struct {
 	G             *GuildState
-	Event         *events.ApplicationCommandInteractionCreate
+	Client        *bot.Client
 	Args          *map[string]any
+	channelID     snowflake.ID
 	lastMessageID snowflake.ID
-	hasResponded  bool
+	mu            sync.RWMutex
 }
 
 func (cs *CommandState) MessageChannelID() snowflake.ID {
-	ch := cs.Event.Channel()
-	return ch.ID()
+	return cs.channelID
 }
 
 func (cs *CommandState) GuildID() snowflake.ID {
-	gid := cs.Event.GuildID()
-	if gid != nil {
-		return *gid
+	if cs.lastMessageID == 0 {
+		return 0
 	}
-	return 0
+	return snowflake.MustParse(cs.G.GuildId)
 }
 
 func (cs *CommandState) Member() *discord.ResolvedMember {
-	return cs.Event.Member()
+	return nil
 }
 
 func (cs *CommandState) SingleResponse(content string) {
-	channelID := cs.MessageChannelID()
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
 
-	if cs.hasResponded && cs.lastMessageID != 0 {
-		cs.UpdateMessage(cs.lastMessageID, content, nil, nil)
+	if cs.lastMessageID != 0 {
+		cs.Client.Rest.UpdateMessage(cs.channelID, cs.lastMessageID,
+			discord.NewMessageUpdate().WithContent(content))
 		return
 	}
 
-	msg, err := cs.Event.Client().Rest.CreateMessage(channelID, discord.NewMessageCreate().WithContent(content))
+	msg, err := cs.Client.Rest.CreateMessage(cs.channelID, discord.NewMessageCreate().WithContent(content))
 	if err != nil {
 		return
 	}
-	cs.hasResponded = true
 	cs.lastMessageID = msg.ID
 }
 
-func (cs *CommandState) Respond(content string) {
-	cs.SingleResponse(content)
-}
+func (cs *CommandState) SingleResponseEphemeral(content string) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
 
-func (cs *CommandState) RespondEphemeral(content string) {
-	if cs.hasResponded && cs.lastMessageID != 0 {
-		channelID := cs.MessageChannelID()
-		cs.Event.Client().Rest.UpdateMessage(channelID, cs.lastMessageID,
+	if cs.lastMessageID != 0 {
+		cs.Client.Rest.UpdateMessage(cs.channelID, cs.lastMessageID,
 			discord.NewMessageUpdate().WithContent(content).WithFlags(discord.MessageFlagEphemeral))
 		return
 	}
-	cs.Event.CreateMessage(discord.NewMessageCreate().WithContent(content).WithFlags(discord.MessageFlagEphemeral))
-	cs.hasResponded = true
+	msg, _ := cs.Client.Rest.CreateMessage(cs.channelID, discord.NewMessageCreate().WithContent(content).WithFlags(discord.MessageFlagEphemeral))
+	cs.lastMessageID = msg.ID
 }
 
-func (cs *CommandState) RespondWithEmbed(embed discord.Embed) {
-	if cs.hasResponded {
+func (cs *CommandState) SingleResponseWithEmbed(content string, embed []discord.Embed) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	if cs.lastMessageID != 0 {
+		cs.Client.Rest.UpdateMessage(cs.channelID, cs.lastMessageID,
+			discord.NewMessageUpdate().WithContent(content).WithEmbeds(embed...))
 		return
 	}
-	channelID := cs.MessageChannelID()
-	cs.Event.Client().Rest.CreateMessage(channelID, discord.NewMessageCreate().WithEmbeds(embed))
-	cs.hasResponded = true
+
+	msg, _ := cs.Client.Rest.CreateMessage(cs.channelID, discord.NewMessageCreate().WithContent(content).WithEmbeds(embed...))
+	cs.lastMessageID = msg.ID
 }
 
-func (cs *CommandState) RespondWithComponents(content string, components []discord.LayoutComponent) {
-	if cs.hasResponded {
+func (cs *CommandState) SingleResponseWithEmbedComponents(content string, embed []discord.Embed, components []discord.LayoutComponent) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	if cs.lastMessageID != 0 {
+		cs.Client.Rest.UpdateMessage(cs.channelID, cs.lastMessageID,
+			discord.NewMessageUpdate().WithContent(content).WithEmbeds(embed...).WithComponents(components...))
 		return
 	}
-	channelID := cs.MessageChannelID()
-	msg, err := cs.Event.Client().Rest.CreateMessage(channelID, discord.NewMessageCreate().
-		WithContent(content).
-		WithComponents(components...))
-	if err != nil {
+
+	msg, _ := cs.Client.Rest.CreateMessage(cs.channelID, discord.NewMessageCreate().
+		WithContent(content).WithEmbeds(embed...).WithComponents(components...))
+	cs.lastMessageID = msg.ID
+}
+
+func (cs *CommandState) SingleResponseWithComponents(content string, components []discord.LayoutComponent) {
+	cs.mu.Lock()
+	defer cs.mu.Unlock()
+
+	if cs.lastMessageID != 0 {
+		cs.Client.Rest.UpdateMessage(cs.channelID, cs.lastMessageID,
+			discord.NewMessageUpdate().WithContent(content).WithComponents(components...))
 		return
 	}
-	cs.hasResponded = true
+
+	msg, _ := cs.Client.Rest.CreateMessage(cs.channelID, discord.NewMessageCreate().
+		WithContent(content).WithComponents(components...))
 	cs.lastMessageID = msg.ID
 }
 
 func (cs *CommandState) SendEmbed(embed discord.Embed) {
-	channelID := cs.MessageChannelID()
-	cs.Event.Client().Rest.CreateMessage(channelID, discord.NewMessageCreate().WithEmbeds(embed))
+	cs.Client.Rest.CreateMessage(cs.channelID, discord.NewMessageCreate().WithEmbeds(embed))
 }
 
 func (cs *CommandState) SendMessage(content string, embeds []discord.Embed, components []discord.LayoutComponent) {
-	channelID := cs.MessageChannelID()
 	msgBuilder := discord.NewMessageCreate().WithContent(content)
 	if len(embeds) > 0 {
 		msgBuilder = msgBuilder.WithEmbeds(embeds...)
@@ -102,15 +120,17 @@ func (cs *CommandState) SendMessage(content string, embeds []discord.Embed, comp
 	if len(components) > 0 {
 		msgBuilder = msgBuilder.WithComponents(components...)
 	}
-	msg, err := cs.Event.Client().Rest.CreateMessage(channelID, msgBuilder)
+	msg, err := cs.Client.Rest.CreateMessage(cs.channelID, msgBuilder)
 	if err != nil {
 		return
 	}
+
+	cs.mu.Lock()
 	cs.lastMessageID = msg.ID
+	cs.mu.Unlock()
 }
 
 func (cs *CommandState) UpdateMessage(messageID snowflake.ID, content string, embeds []discord.Embed, components []discord.LayoutComponent) {
-	channelID := cs.MessageChannelID()
 	updateBuilder := discord.NewMessageUpdate()
 	if content != "" {
 		updateBuilder.Content = &content
@@ -121,14 +141,16 @@ func (cs *CommandState) UpdateMessage(messageID snowflake.ID, content string, em
 	if len(components) > 0 {
 		updateBuilder.Components = &components
 	}
-	cs.Event.Client().Rest.UpdateMessage(channelID, messageID, updateBuilder)
+	cs.Client.Rest.UpdateMessage(cs.channelID, messageID, updateBuilder)
 }
 
 func (cs *CommandState) ChannelID() snowflake.ID {
-	return cs.MessageChannelID()
+	return cs.channelID
 }
 
 func (cs *CommandState) LastMessageID() snowflake.ID {
+	cs.mu.RLock()
+	defer cs.mu.RUnlock()
 	return cs.lastMessageID
 }
 

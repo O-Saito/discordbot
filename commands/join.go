@@ -80,8 +80,8 @@ func (c *JoinCommand) Execute(cs *bot.CommandState) error {
 		}
 
 		// Find user's voice channel from cache
-		if userID != 0 && cs.Event != nil {
-			caches := cs.Event.Client().Caches
+		if userID != 0 && cs.Client != nil {
+			caches := cs.Client.Caches
 			voiceStates := caches.VoiceStates(snowflake.MustParse(g.GuildId))
 			for vs := range voiceStates {
 				if vs.UserID == userID && vs.ChannelID != nil {

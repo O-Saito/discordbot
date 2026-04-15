@@ -214,13 +214,26 @@ func (m *Manager) handleApplicationCommand(e *events.ApplicationCommandInteracti
 		return
 	}
 
-	CommandState := &CommandState{
-		G:     state,
-		Event: e,
-		Args:  cmd.ParseInteraction(e),
+	err := e.CreateMessage(discord.NewMessageCreate().WithContent(fmt.Sprintf("Executando o comando %s", cmdName)))
+	if err != nil {
+		fmt.Printf("Error creating message: %v\n", err)
+		return
 	}
 
-	e.CreateMessage(discord.NewMessageCreate().WithContent(fmt.Sprintf("Executando o comando %s", cmdName)))
+	msg, _ := e.Client().Rest.UpdateInteractionResponse(
+		e.ApplicationID(),
+		e.Token(),
+		discord.NewMessageUpdate().WithContent(fmt.Sprintf("Executando o comando %s", cmdName)),
+	)
+
+	CommandState := &CommandState{
+		G:             state,
+		Client:        e.Client(),
+		Args:          cmd.ParseInteraction(e),
+		channelID:     e.Channel().ID(),
+		lastMessageID: msg.ID,
+	}
+
 	fmt.Printf("Executing %s command\n", cmdName)
 
 	go cmd.Execute(CommandState)
@@ -270,7 +283,6 @@ func (m *Manager) handleComponentInteraction(e *events.ComponentInteractionCreat
 
 	guildID := e.GuildID().String()
 	state := m.GetGuildState(guildID)
-	state.mu.Lock()
 
 	parts := strings.SplitN(customID, "_", 2)
 	if len(parts) < 2 {
@@ -284,13 +296,16 @@ func (m *Manager) handleComponentInteraction(e *events.ComponentInteractionCreat
 		return
 	}
 
+	e.DeferUpdateMessage()
+
 	cs := &CommandState{
-		G:     state,
-		Event: nil,
-		Args:  nil,
+		G:             state,
+		Client:        e.Client(),
+		Args:          nil,
+		channelID:     e.Channel().ID(),
+		lastMessageID: e.Message.ID,
 	}
 
-	state.mu.Unlock()
 	switch data := data.(type) {
 	case discord.ButtonInteractionData:
 		cmd.HandleButton(cs, strings.Join(parts[1:], "_"))

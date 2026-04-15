@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"mydiscordbot/domain"
+
+	"github.com/disgoorg/disgo/discord"
 )
 
 const (
@@ -14,34 +16,68 @@ const (
 	MusicPrefix   = "music"
 )
 
-func BuildListPageComponents(tracks []domain.Track, page, totalPages int) (string, []string) {
+func BuildListPageComponents(tracks []domain.Track, page, totalPages int) (discord.Embed, []discord.LayoutComponent) {
 	start := page * TracksPerPage
 	end := start + TracksPerPage
 	if end > len(tracks) {
 		end = len(tracks)
 	}
 
-	msg := fmt.Sprintf("Music Library - Page %d of %d (Total: %d)\n\n", page+1, totalPages, len(tracks))
+	embed := discord.NewEmbed().
+		WithTitle("🎵 Music Library").
+		WithDescription(fmt.Sprintf("Page %d of %d (Total: %d)", page+1, totalPages, len(tracks))).
+		WithColor(TrackBlue)
 
+	fields := make([]discord.EmbedField, 0, end-start)
 	for idx := start; idx < end; idx++ {
 		title := tracks[idx].Title()
-		if len(title) > 50 {
-			title = title[:47] + "..."
+		if len(title) > 100 {
+			title = title[:97] + "..."
 		}
-		msg += fmt.Sprintf("%d. %s\n", idx+1, title)
+		inline := false
+		fields = append(fields, discord.EmbedField{
+			Name:   fmt.Sprintf("%d. %s", idx+1, title),
+			Value:  "",
+			Inline: &inline,
+		})
+	}
+	embed = embed.WithFields(fields...)
+
+	var selectOptions []discord.StringSelectMenuOption
+	for idx := start; idx < end; idx++ {
+		title := tracks[idx].Title()
+		if len(title) > 100 {
+			title = title[:97] + "..."
+		}
+		selectOptions = append(selectOptions, discord.NewStringSelectMenuOption(
+			fmt.Sprintf("%d. %s", idx+1, title),
+			fmt.Sprintf("%s_select_%d_%d", MusicPrefix, page, idx),
+		))
 	}
 
-	var buttons []string
+	var components []discord.LayoutComponent
+
+	components = append(components, discord.NewActionRow(
+		discord.NewStringSelectMenu(
+			fmt.Sprintf("%s_select_%d", MusicPrefix, page),
+			"Select a track to add to queue...",
+			selectOptions...,
+		).WithMinValues(1).WithMaxValues(1),
+	))
+
 	if totalPages > 1 {
-		if page > 0 {
-			buttons = append(buttons, fmt.Sprintf("%s_list_prev_%d", MusicPrefix, page))
+		prevButton := discord.NewSecondaryButton("◀", fmt.Sprintf("%s_list_prev_%d", MusicPrefix, page))
+		if page == 0 {
+			prevButton = prevButton.AsDisabled()
 		}
-		if page < totalPages-1 {
-			buttons = append(buttons, fmt.Sprintf("%s_list_next_%d", MusicPrefix, page))
+		nextButton := discord.NewSecondaryButton("▶", fmt.Sprintf("%s_list_next_%d", MusicPrefix, page))
+		if page >= totalPages-1 {
+			nextButton = nextButton.AsDisabled()
 		}
+		components = append(components, discord.NewActionRow(prevButton, nextButton))
 	}
 
-	return msg, buttons
+	return embed, components
 }
 
 func ParseListPageAction(customID string) (page int, ok bool) {
@@ -144,37 +180,61 @@ func ParseQueueAction(customID string) (page int, ok bool) {
 	return 0, false
 }
 
-func BuildQueuePageComponents(tracks []domain.Track, currentTrack string, page, totalPages int) (string, []string) {
+func BuildQueuePageComponents(tracks []domain.Track, currentTrack string, page, totalPages int) (discord.Embed, []discord.LayoutComponent) {
 	start := page * TracksPerPage
 	end := start + TracksPerPage
 	if end > len(tracks) {
 		end = len(tracks)
 	}
 
-	msg := fmt.Sprintf("Music Queue - Page %d of %d\n\n", page+1, totalPages)
+	fields := make([]discord.EmbedField, 0, end-start+2)
+	inlineFalse := false
 
 	if currentTrack != "" {
-		msg += fmt.Sprintf("Now Playing: %s\n\nUp Next:\n─────────────────────\n", currentTrack)
+		fields = append(fields, discord.EmbedField{
+			Name:   "Now Playing",
+			Value:  currentTrack,
+			Inline: &inlineFalse,
+		})
 	}
+
+	fields = append(fields, discord.EmbedField{
+		Name:   "Up Next",
+		Value:  "─────────────────────",
+		Inline: &inlineFalse,
+	})
 
 	for i := start; i < end && i < len(tracks); i++ {
 		trackNum := i + 1
 		title := tracks[i].Title()
-		if len(title) > 50 {
-			title = title[:47] + "..."
+		if len(title) > 100 {
+			title = title[:97] + "..."
 		}
-		msg += fmt.Sprintf("%d. %s\n", trackNum, title)
+		fields = append(fields, discord.EmbedField{
+			Name:   fmt.Sprintf("%d. %s", trackNum, title),
+			Value:  "",
+			Inline: &inlineFalse,
+		})
 	}
 
-	var buttons []string
+	embed := discord.NewEmbed().
+		WithTitle("🎵 Music Queue").
+		WithDescription(fmt.Sprintf("Page %d of %d", page+1, totalPages)).
+		WithColor(TrackBlue).
+		WithFields(fields...)
+
+	var components []discord.LayoutComponent
 	if totalPages > 1 {
-		if page > 0 {
-			buttons = append(buttons, fmt.Sprintf("queue_prev_%d", page))
+		prevButton := discord.NewSecondaryButton("◀", fmt.Sprintf("queue_prev_%d", page))
+		if page == 0 {
+			prevButton = prevButton.AsDisabled()
 		}
-		if page < totalPages-1 {
-			buttons = append(buttons, fmt.Sprintf("queue_next_%d", page))
+		nextButton := discord.NewSecondaryButton("▶", fmt.Sprintf("queue_next_%d", page))
+		if page >= totalPages-1 {
+			nextButton = nextButton.AsDisabled()
 		}
+		components = append(components, discord.NewActionRow(prevButton, nextButton))
 	}
 
-	return msg, buttons
+	return embed, components
 }

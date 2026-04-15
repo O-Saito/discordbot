@@ -55,14 +55,9 @@ func (c *MusicCommand) HandleButton(cs *bot.CommandState, customID string) error
 			totalPages = 1
 		}
 
-		msg, buttons := discord_helper.BuildQueuePageComponents(queueTracks, currentTrack, queuePage, totalPages)
+		msg, components := discord_helper.BuildQueuePageComponents(queueTracks, currentTrack, queuePage, totalPages)
 
-		embed := discord.NewEmbed().
-			WithDescription(msg).
-			WithColor(TrackBlue)
-
-		components := buildButtons(buttons)
-		cs.UpdateMessage(messageID, "", []discord.Embed{embed}, components)
+		cs.UpdateMessage(messageID, "", []discord.Embed{msg}, components)
 		return nil
 	}
 
@@ -86,13 +81,8 @@ func (c *MusicCommand) HandleButton(cs *bot.CommandState, customID string) error
 
 		messageID := cs.LastMessageID()
 
-		msg, buttons := discord_helper.BuildListPageComponents(tracks, page, totalPages)
+		embed, components := discord_helper.BuildListPageComponents(tracks, page, totalPages)
 
-		embed := discord.NewEmbed().
-			WithDescription(msg).
-			WithColor(TrackBlue)
-
-		components := buildButtons(buttons)
 		cs.UpdateMessage(messageID, "", []discord.Embed{embed}, components)
 	})
 
@@ -182,20 +172,23 @@ func (c *MusicCommand) HandleSelectMenu(cs *bot.CommandState, customID string, v
 func (c *MusicCommand) ParseInteraction(e *events.ApplicationCommandInteractionCreate) *map[string]any {
 	data := e.SlashCommandInteractionData()
 
-	subCmd := data.CommandName()
+	subCmd := strings.TrimPrefix(data.CommandPath(), "/music/")
 
 	result := map[string]any{
 		"subcommand": subCmd,
 	}
 
-	query := data.String("query")
-	if query != "" {
-		result["query"] = query
-	}
-
-	level := data.Int("level")
-	if level != 0 {
-		result["level"] = level
+	for name, opt := range data.Options {
+		switch opt.Type {
+		case discord.ApplicationCommandOptionTypeString:
+			result[name] = opt.String()
+		case discord.ApplicationCommandOptionTypeInt:
+			result[name] = int(opt.Int())
+		case discord.ApplicationCommandOptionTypeBool:
+			result[name] = opt.Bool()
+		case discord.ApplicationCommandOptionTypeFloat:
+			result[name] = opt.Float()
+		}
 	}
 
 	return &result
@@ -366,13 +359,7 @@ func handleQueue(cs *bot.CommandState, opts *map[string]any) error {
 		totalPages = 1
 	}
 
-	msg, buttons := discord_helper.BuildQueuePageComponents(queueTracks, currentTrack, 0, totalPages)
-
-	embed := discord.NewEmbed().
-		WithDescription(msg).
-		WithColor(TrackBlue)
-
-	components := buildButtons(buttons)
+	embed, components := discord_helper.BuildQueuePageComponents(queueTracks, currentTrack, 0, totalPages)
 
 	cs.SendMessage("", []discord.Embed{embed}, components)
 
@@ -435,15 +422,9 @@ func handleList(cs *bot.CommandState, opts *map[string]any) error {
 			totalPages = 1
 		}
 
-		msg, buttons := discord_helper.BuildListPageComponents(tracks, 0, totalPages)
+		embed, components := discord_helper.BuildListPageComponents(tracks, 0, totalPages)
 
-		embed := discord.NewEmbed().
-			WithDescription(msg).
-			WithColor(TrackBlue)
-
-		components := buildButtons(buttons)
-
-		cs.SendMessage("", []discord.Embed{embed}, components)
+		cs.SingleResponseWithEmbedComponents(" ", []discord.Embed{embed}, components)
 	})
 
 	cs.SingleResponse("Loading music files...")
