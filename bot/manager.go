@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -8,45 +9,94 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo"
+	"github.com/disgoorg/disgo/bot"
+	"github.com/disgoorg/disgo/cache"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/disgo/gateway"
+	"github.com/disgoorg/disgo/voice"
+	"github.com/thomas-vilte/dave-go/session"
 
 	"mydiscordbot/audio"
 	"mydiscordbot/config"
 	"mydiscordbot/domain"
 )
 
+var globalManager *Manager
+
 type Manager struct {
 	config     *config.Config
-	session    *discordgo.Session
+	client     *bot.Client
 	guildState map[string]*GuildState
 	mu         sync.RWMutex
 	ffmpegPath string
 }
 
-func NewManager(config *config.Config) (*Manager, error) {
-	if config.Token == "" {
+func NewManager(cfg *config.Config) (*Manager, error) {
+	if cfg.Token == "" {
 		return nil, fmt.Errorf("discord token is required")
 	}
 
-	dg, err := discordgo.New("Bot " + config.Token)
+	client, err := disgo.New(cfg.Token,
+		bot.WithGatewayConfigOpts(
+			gateway.WithIntents(
+				gateway.IntentGuilds,
+				gateway.IntentGuildVoiceStates,
+				gateway.IntentGuildMessages,
+			),
+		),
+		bot.WithCacheConfigOpts(
+			cache.WithCaches(cache.FlagVoiceStates),
+		),
+		bot.WithVoiceManagerConfigOpts(
+			voice.WithDaveSessionCreateFunc(session.New),
+		),
+		bot.WithEventListenerFunc(func(e *events.Ready) {
+			fmt.Printf("Logged in as: %s\n", e.User.Username)
+			//globalManager.mu.Lock()
+			//globalManager.mu.Unlock()
+			for _, guild := range e.Guilds {
+				globalManager.GetGuildState(guild.ID.String())
+			}
+		}),
+		bot.WithEventListenerFunc(func(e *events.GuildJoin) {
+			fmt.Printf("Guild created/joined: %s (%s)\n", e.Guild.Name, e.GuildID)
+			globalManager.GetGuildState(e.GuildID.String())
+		}),
+		bot.WithEventListenerFunc(func(e *events.ApplicationCommandInteractionCreate) {
+			globalManager.handleApplicationCommand(e)
+		}),
+		bot.WithEventListenerFunc(func(e *events.GuildVoiceStateUpdate) {
+			globalManager.handleVoiceStateUpdate(e)
+		}),
+		bot.WithEventListenerFunc(func(e *events.GuildLeave) {
+			fmt.Printf("Guild left: %s\n", e.GuildID)
+			globalManager.RemoveGuildState(e.GuildID.String())
+		}),
+		bot.WithEventListenerFunc(func(e *events.ComponentInteractionCreate) {
+			globalManager.handleComponentInteraction(e)
+		}),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Discord session: %w", err)
+		return nil, fmt.Errorf("failed to create DisGo client: %w", err)
 	}
 
-	dg.StateEnabled = true
-	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildVoiceStates | discordgo.IntentsMessageContent | discordgo.IntentsAll
-
-	return &Manager{
-		session:    dg,
-		config:     config,
+	m := &Manager{
+		client:     client,
+		config:     cfg,
 		guildState: make(map[string]*GuildState),
 		ffmpegPath: "ffmpeg",
-	}, nil
+	}
+	globalManager = m
+
+	return m, nil
 }
 
-func (m *Manager) Session() *discordgo.Session {
-	return m.session
+func (m *Manager) Client() *bot.Client {
+	return m.client
 }
 
 func (m *Manager) MusicFolders() []string {
@@ -58,16 +108,9 @@ func (m *Manager) RecursiveSearch() bool {
 }
 
 func (m *Manager) Start() error {
-	m.session.AddHandler(m.onReady)
-	m.session.AddHandler(m.onGuildCreate)
-	m.session.AddHandler(m.onMessageCreate)
-	m.session.AddHandler(m.onGuildLeave)
-	m.session.AddHandler(m.onVoiceStateUpdate)
-	m.session.AddHandler(m.onInteractionCreate)
-
-	fmt.Println("Opening Discord session...")
-	if err := m.session.Open(); err != nil {
-		return fmt.Errorf("failed to open session: %w", err)
+	fmt.Println("Opening Discord gateway...")
+	if err := m.client.OpenGateway(context.TODO()); err != nil {
+		return fmt.Errorf("failed to open gateway: %w", err)
 	}
 
 	fmt.Println("Bot is now online!")
@@ -75,26 +118,20 @@ func (m *Manager) Start() error {
 }
 
 func (m *Manager) Stop() error {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
 	for _, state := range m.guildState {
 		if state.Player != nil {
 			state.Player.Stop()
 		}
-		if state.VoiceConnection != nil {
-			state.VoiceConnection.Disconnect()
-		}
-
-		for _, v := range state.ActiveCommands {
-			err := m.session.ApplicationCommandDelete(m.config.ApplicationID, state.GuildId, v.ID)
-			if err != nil {
-				log.Panicf("Cannot delete '%v' command: %v", v.Name, err)
-			}
+		if state.VoiceConn != nil {
+			state.VoiceConn.Close(ctx)
 		}
 	}
 
-	return m.session.Close()
+	m.client.Close(ctx)
+	return nil
 }
 
 func (m *Manager) GetGuildState(guildID string) *GuildState {
@@ -102,6 +139,7 @@ func (m *Manager) GetGuildState(guildID string) *GuildState {
 	defer m.mu.Unlock()
 
 	if state, exists := m.guildState[guildID]; exists {
+		fmt.Printf("Returning state: \n")
 		return state
 	}
 
@@ -120,7 +158,7 @@ func (m *Manager) GetGuildState(guildID string) *GuildState {
 		Volume:         100,
 		Player:         player,
 		Manager:        m,
-		ActiveCommands: make([]*discordgo.ApplicationCommand, len(commands)),
+		ActiveCommands: make([]ApplicationCommand, len(commands)),
 		Data:           make(map[string]any),
 	}
 
@@ -130,11 +168,16 @@ func (m *Manager) GetGuildState(guildID string) *GuildState {
 			fmt.Printf("Command %s does not provide an application command definition\n", v.Name())
 			continue
 		}
-		m.session.ApplicationCommandCreate(m.config.ApplicationID, state.GuildId, ac)
+
+		cmd, err := m.client.Rest.CreateGlobalCommand(m.client.ApplicationID, ac)
 		if err != nil {
 			log.Panicf("Cannot create '%s' command: %v", v.Name(), err)
 		}
-		state.ActiveCommands[i] = ac
+
+		state.ActiveCommands[i] = ApplicationCommand{
+			ID:   cmd.ID(),
+			Name: cmd.Name(),
+		}
 	}
 
 	m.guildState[guildID] = state
@@ -150,273 +193,63 @@ func (m *Manager) RemoveGuildState(guildID string) {
 		if state.Player != nil {
 			state.Player.Stop()
 		}
-		if state.VoiceConnection != nil {
-			state.VoiceConnection.Disconnect()
+		if state.VoiceConn != nil {
+			state.VoiceConn.Close(context.TODO())
 		}
 		delete(m.guildState, guildID)
 		fmt.Printf("Removed GuildState for guild: %s\n", guildID)
 	}
 }
 
-func (m *Manager) onReady(s *discordgo.Session, r *discordgo.Ready) {
-	fmt.Printf("Logged in as: %s#%s\n", s.State.User.Username, s.State.User.Discriminator)
+func (m *Manager) handleApplicationCommand(e *events.ApplicationCommandInteractionCreate) {
+	guildID := e.GuildID().String()
+	state := m.GetGuildState(guildID)
 
-	err := s.UpdateStatusComplex(discordgo.UpdateStatusData{
-		Status: string(discordgo.StatusOnline),
-		Activities: []*discordgo.Activity{
-			{
-				Name: "waiting for command!",
-				Type: discordgo.ActivityTypeWatching,
-			},
-		},
-	})
-	if err != nil {
-		fmt.Printf("Failed to set status: %v\n", err)
-	} else {
-		fmt.Printf("Bot status set to: Idle: waiting for command!\n")
-	}
+	data := e.SlashCommandInteractionData()
+	cmdName := data.CommandName()
 
-	s.State.RLock()
-	for _, guild := range s.State.Guilds {
-		m.GetGuildState(guild.ID)
-		fmt.Printf("Registered guild: %s (%s)\n", guild.Name, guild.ID)
-	}
-	s.State.RUnlock()
-
-	if m.config.VoiceChannelID != "" && m.config.GuildID != "" {
-		state := m.GetGuildState(m.config.GuildID)
-		m.handleVoiceJoin(state, m.config.VoiceChannelID)
-
-		cmd := GetCommand("add")
-		if cmd == nil {
-			fmt.Printf("Add command not found\n")
-			return
-		}
-		//cmd.Execute(state, s, &map[string]any{"query": "something"})
-	}
-
-}
-
-func (m *Manager) onGuildCreate(s *discordgo.Session, g *discordgo.GuildCreate) {
-	fmt.Printf("Guild created/joined: %s (%s)\n", g.Name, g.ID)
-	m.GetGuildState(g.ID)
-}
-
-func (m *Manager) onVoiceStateUpdate(s *discordgo.Session, vs *discordgo.VoiceState) {
-	fmt.Printf("onVoiceStateUpdate: UserID=%s, GuildID=%s, ChannelID=%s\n", vs.UserID, vs.GuildID, vs.ChannelID)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if vs.UserID != s.State.User.ID {
-		return
-	}
-
-	state := m.GetGuildState(vs.GuildID)
-
-	if vs.ChannelID == "" {
-		fmt.Printf("Left voice channel in guild: %s\n", vs.GuildID)
-		if state.VoiceConnection != nil {
-			state.VoiceConnection.Disconnect()
-			state.VoiceConnection = nil
-		}
-		state.VoiceChannel = ""
-		return
-	}
-
-}
-
-func (m *Manager) onMessageCreate(s *discordgo.Session, msg *discordgo.MessageCreate) {
-	fmt.Printf("onMessageCreate: UserID=%s, GuildID=%s, Content=%s\n", msg.Author.ID, msg.GuildID, msg.Content)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if msg.Author.ID == s.State.User.ID {
-		return
-	}
-
-	guildID := msg.GuildID
-	if guildID == "" {
-		return
-	}
-
-}
-
-func (m *Manager) onInteractionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	state := m.GetGuildState(i.GuildID)
-	state.mu.Lock()
-	defer state.mu.Unlock()
-
-	switch i.Type {
-	case discordgo.InteractionApplicationCommand:
-		m.handleApplicationCommand(s, i, state)
-	case discordgo.InteractionMessageComponent:
-		m.handleMessageComponent(s, i, state)
-	case discordgo.InteractionModalSubmit:
-		m.handleModalSubmit(s, i, state)
-	}
-}
-
-func (m *Manager) handleApplicationCommand(s *discordgo.Session, i *discordgo.InteractionCreate, state *GuildState) {
-	cmd := GetCommand(i.ApplicationCommandData().Name)
+	cmd := GetCommand(cmdName)
 	if cmd == nil {
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "Comando não encontrado",
-			},
-		})
-		fmt.Printf("%s command not found\n", i.ApplicationCommandData().Name)
+		e.CreateMessage(discord.NewMessageCreate().WithContent("Comando não encontrado"))
 		return
 	}
 
 	CommandState := &CommandState{
-		G:    state,
-		S:    s,
-		I:    i,
-		Args: cmd.ParseInteraction(i),
+		G:     state,
+		Event: e,
+		Args:  cmd.ParseInteraction(e),
 	}
 
-	CommandState.SingleRespond(fmt.Sprintf("Executando o comando %s", i.ApplicationCommandData().Name))
-	fmt.Printf("Executing %s command\n", i.ApplicationCommandData().Name)
+	e.CreateMessage(discord.NewMessageCreate().WithContent(fmt.Sprintf("Executando o comando %s", cmdName)))
+	fmt.Printf("Executing %s command\n", cmdName)
 
-	cmd.Execute(CommandState)
+	go cmd.Execute(CommandState)
 }
 
-func (m *Manager) handleMessageComponent(s *discordgo.Session, i *discordgo.InteractionCreate, state *GuildState) {
-	componentData := i.MessageComponentData()
-	customID := componentData.CustomID
-	if customID == "" {
-		return
-	}
+func (m *Manager) handleVoiceStateUpdate(e *events.GuildVoiceStateUpdate) {
+	guildID := e.VoiceState.GuildID.String()
+	userID := e.VoiceState.UserID
 
-	componentType := componentData.ComponentType
-	componentStr := "unknown"
-	switch componentType {
-	case discordgo.ButtonComponent:
-		componentStr = "button"
-	case discordgo.SelectMenuComponent:
-		componentStr = "selectMenu"
-	}
-	fmt.Printf("[Interaction] Received %s from guild=%s, channel=%s, message=%s, customID=%s\n",
-		componentStr, i.GuildID, i.ChannelID, i.Message.ID, customID)
+	//m.mu.Lock()
+	//defer m.mu.Unlock()
 
-	parts := strings.SplitN(customID, "_", 2)
-	if len(parts) < 2 {
-		return
-	}
+	state := m.GetGuildState(guildID)
 
-	cmd := GetCommand(parts[0])
-	if cmd == nil {
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseDeferredMessageUpdate,
-		})
-		fmt.Printf("[Interaction] Command not found: %s\n", parts[0])
-		return
-	}
-
-	fmt.Printf("[Interaction] Handling: cmd=%s, action=%s\n", cmd.Name(), strings.Join(parts[1:], "_"))
-
-	CommandState := &CommandState{
-		G:    state,
-		S:    s,
-		I:    i,
-		Args: nil,
-	}
-
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseDeferredMessageUpdate,
-	})
-
-	switch componentType {
-	case discordgo.ButtonComponent:
-		cmd.HandleButton(CommandState, strings.Join(parts[1:], "_"))
-	case discordgo.SelectMenuComponent:
-		values := componentData.Values
-		cmd.HandleSelectMenu(CommandState, strings.Join(parts[1:], "_"), values)
-	}
-}
-
-func (m *Manager) handleModalSubmit(s *discordgo.Session, i *discordgo.InteractionCreate, state *GuildState) {
-	data := i.ModalSubmitData()
-	customID := data.CustomID
-	if customID == "" {
-		return
-	}
-
-	fmt.Printf("[Interaction] Received modal from guild=%s, channel=%s, customID=%s\n",
-		i.GuildID, i.ChannelID, customID)
-
-	parts := strings.SplitN(customID, "_", 2)
-	if len(parts) < 2 {
-		return
-	}
-
-	cmd := GetCommand(parts[0])
-	if cmd == nil {
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseDeferredMessageUpdate,
-		})
-		fmt.Printf("[Interaction] Command not found for modal: %s\n", parts[0])
-		return
-	}
-
-	fmt.Printf("[Interaction] Handling modal: cmd=%s, action=%s\n", cmd.Name(), parts[1])
-
-	modalData := make(map[string]string)
-	for _, row := range data.Components {
-		switch row := row.(type) {
-		case *discordgo.ActionsRow:
-			for _, comp := range row.Components {
-				if ti, ok := comp.(*discordgo.TextInput); ok {
-					modalData[ti.CustomID] = ti.Value
-				}
+	if userID == m.client.ID() {
+		if e.VoiceState.ChannelID == nil || *e.VoiceState.ChannelID == 0 {
+			fmt.Printf("Left voice channel in guild: %s\n", guildID)
+			if state.VoiceConn != nil {
+				//state.VoiceConn.Close(context.TODO())
+				//state.VoiceConn = nil
 			}
+			//state.VoiceChannel = 0
 		}
 	}
-
-	CommandState := &CommandState{
-		G:    state,
-		S:    s,
-		I:    i,
-		Args: nil,
-	}
-
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseDeferredMessageUpdate,
-	})
-
-	cmd.HandleModalSubmit(CommandState, parts[1], modalData)
-}
-
-func (m *Manager) handleVoiceJoin(state *GuildState, channelID string) {
-	fmt.Printf("Handling voice join for guild: %s, channel: %s\n", state.GuildId, channelID)
-
-	if state.VoiceConnection != nil {
-		if state.VoiceChannel == channelID {
-			return
-		}
-		state.VoiceConnection.Disconnect()
-	}
-
-	vc, err := m.session.ChannelVoiceJoin(state.GuildId, channelID, false, true)
-	if err != nil {
-		fmt.Printf("Failed to join voice channel: %v\n", err)
-		return
-	}
-
-	state.VoiceConnection = vc
-	state.VoiceChannel = channelID
-
-	fmt.Printf("Joined voice channel: %s in guild: %s\n", channelID, state.GuildId)
 }
 
 func (m *Manager) AddToQueue(guildID string, track domain.Track) {
 	state := m.GetGuildState(guildID)
 	state.Queue.Enqueue(track)
-}
-
-func (m *Manager) onGuildLeave(s *discordgo.Session, event *discordgo.GuildDelete) {
-	m.RemoveGuildState(event.ID)
 }
 
 func (m *Manager) WaitForSignal() {
@@ -425,4 +258,43 @@ func (m *Manager) WaitForSignal() {
 	<-sc
 
 	fmt.Println("\nShutting down...")
+}
+
+func (m *Manager) handleComponentInteraction(e *events.ComponentInteractionCreate) {
+	data := e.Data
+	customID := data.CustomID()
+
+	if customID == "" {
+		return
+	}
+
+	guildID := e.GuildID().String()
+	state := m.GetGuildState(guildID)
+	state.mu.Lock()
+
+	parts := strings.SplitN(customID, "_", 2)
+	if len(parts) < 2 {
+		return
+	}
+
+	cmdName := parts[0]
+	cmd := GetCommand(cmdName)
+	if cmd == nil {
+		e.CreateMessage(discord.NewMessageCreate().WithContent("Command not found").WithFlags(discord.MessageFlagEphemeral))
+		return
+	}
+
+	cs := &CommandState{
+		G:     state,
+		Event: nil,
+		Args:  nil,
+	}
+
+	state.mu.Unlock()
+	switch data := data.(type) {
+	case discord.ButtonInteractionData:
+		cmd.HandleButton(cs, strings.Join(parts[1:], "_"))
+	case discord.StringSelectMenuInteractionData:
+		cmd.HandleSelectMenu(cs, strings.Join(parts[1:], "_"), data.Values)
+	}
 }

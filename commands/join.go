@@ -1,10 +1,14 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"mydiscordbot/bot"
+	"time"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/snowflake/v2"
 )
 
 type JoinCommand struct {
@@ -14,22 +18,18 @@ type JoinCommand struct {
 func (c *JoinCommand) Name() string        { return "join" }
 func (c *JoinCommand) Description() string { return "Join a voice channel" }
 
-func (c *JoinCommand) GetApplicationCommand() *discordgo.ApplicationCommand {
-	return &discordgo.ApplicationCommand{
+func (c *JoinCommand) GetApplicationCommand() discord.ApplicationCommandCreate {
+	return discord.SlashCommandCreate{
 		Name:        c.Name(),
 		Description: c.Description(),
-		Options: []*discordgo.ApplicationCommandOption{
-			{
-				Type:        discordgo.ApplicationCommandOptionChannel,
-				Name:        "channel",
-				Description: "Voice channel to join",
-				ChannelTypes: []discordgo.ChannelType{
-					discordgo.ChannelTypeGuildVoice,
-				},
-				Required: false,
+		Options: []discord.ApplicationCommandOption{
+			discord.ApplicationCommandOptionChannel{
+				Name:         "channel",
+				Description:  "Voice channel to join",
+				ChannelTypes: []discord.ChannelType{discord.ChannelTypeGuildVoice},
+				Required:     false,
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionUser,
+			discord.ApplicationCommandOptionUser{
 				Name:        "user",
 				Description: "Join the voice channel this user is in",
 				Required:    false,
@@ -38,74 +38,93 @@ func (c *JoinCommand) GetApplicationCommand() *discordgo.ApplicationCommand {
 	}
 }
 
-func (c *JoinCommand) ParseInteraction(i *discordgo.InteractionCreate) *map[string]any {
+func (c *JoinCommand) ParseInteraction(e *events.ApplicationCommandInteractionCreate) *map[string]any {
 	opts := make(map[string]any)
+	data := e.SlashCommandInteractionData()
 
-	if len(i.ApplicationCommandData().Options) > 0 {
-		for _, opt := range i.ApplicationCommandData().Options {
-			if opt.Name == "channel" {
-				opts["channel"] = opt.ChannelValue(nil)
-			} else if opt.Name == "user" {
-				opts["user"] = opt.UserValue(nil)
-			}
-		}
+	opts["channel"] = data.Channel("channel").ID
+	opts["user"] = data.User("user").ID
+
+	if member := e.Member(); member != nil {
+		opts["member"] = member.User.ID
 	}
-
-	if i.Member != nil {
-		opts["member"] = i.Member
-	}
-
 	return &opts
 }
 
 func (c *JoinCommand) Execute(cs *bot.CommandState) error {
 	args := cs.Args
 	g := cs.G
-	s := cs.S
 
-	channelID := ""
+	guildID := snowflake.MustParse(g.GuildId)
+	var channelID snowflake.ID
 
-	channelOpt, hasChannel := (*args)["channel"].(*discordgo.Channel)
-	userOpt, hasUser := (*args)["user"].(*discordgo.User)
-	memberOpt, hasMember := (*args)["member"].(*discordgo.Member)
+	// Try channel from args
+	if ch, ok := (*args)["channel"].(snowflake.ID); ok && ch != 0 {
+		channelID = ch
+	}
 
-	if hasChannel && channelOpt != nil {
-		channelID = channelOpt.ID
-	} else if hasUser && userOpt != nil {
-		vState, err := s.State.VoiceState(g.GuildId, userOpt.ID)
-		if err != nil || vState == nil || vState.ChannelID == "" {
-			cs.SingleRespond("User is not in a voice channel")
-			return nil
+	// If no channel, try user or member
+	if channelID == 0 {
+		var userID snowflake.ID
+
+		// Try user from args
+		if user, ok := (*args)["user"].(snowflake.ID); ok && user != 0 {
+			userID = user
 		}
-		channelID = vState.ChannelID
-	} else if hasMember && memberOpt != nil {
-		vState, err := s.State.VoiceState(g.GuildId, memberOpt.User.ID)
-		if err != nil || vState == nil || vState.ChannelID == "" {
-			cs.SingleRespond("You are not in a voice channel")
-			return nil
+
+		// Fallback to member (command user)
+		if userID == 0 {
+			if member, ok := (*args)["member"].(snowflake.ID); ok && member != 0 {
+				userID = member
+			}
 		}
-		channelID = vState.ChannelID
-	} else {
-		cs.SingleRespond("You are not in a voice channel")
+
+		// Find user's voice channel from cache
+		if userID != 0 && cs.Event != nil {
+			caches := cs.Event.Client().Caches
+			voiceStates := caches.VoiceStates(snowflake.MustParse(g.GuildId))
+			for vs := range voiceStates {
+				if vs.UserID == userID && vs.ChannelID != nil {
+					channelID = *vs.ChannelID
+					break
+				}
+			}
+		}
+	}
+
+	if channelID == 0 {
+		cs.SingleResponse("Please specify a voice channel or join one yourself")
 		return nil
 	}
 
-	channel, err := s.Channel(channelID)
-	if err != nil {
-		cs.SingleRespond(fmt.Sprintf("Error finding channel: %v", err))
+	if g.VoiceConn != nil && g.VoiceChannel != 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		g.VoiceConn.Close(ctx)
+		cancel()
+	}
+
+	if g.VoiceConn == nil {
+		conn := cs.G.Manager.Client().VoiceManager.CreateConn(guildID)
+		g.VoiceConn = conn
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := g.VoiceConn.Open(ctx, channelID, false, false); err != nil {
+		fmt.Printf("Error joining channel: %v \n", err)
+		cs.SingleResponse(fmt.Sprintf("Error joining channel: %v", err))
 		return nil
 	}
 
-	vc, err := s.ChannelVoiceJoin(g.GuildId, channelID, false, true)
-	if err != nil {
-		cs.SingleRespond(fmt.Sprintf("Error joining channel: %v", err))
-		return nil
-	}
-
-	g.VoiceConnection = vc
 	g.VoiceChannel = channelID
+	cs.SingleResponse("Joined voice channel")
+	return nil
+}
 
-	cs.SingleRespond(fmt.Sprintf("Joined voice channel: %s", channel.Name))
-
+func (c *JoinCommand) HandleButton(cs *bot.CommandState, customID string) error { return nil }
+func (c *JoinCommand) HandleSelectMenu(cs *bot.CommandState, customID string, values []string) error {
+	return nil
+}
+func (c *JoinCommand) HandleModalSubmit(cs *bot.CommandState, customID string, data map[string]string) error {
 	return nil
 }

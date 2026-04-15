@@ -5,7 +5,8 @@ import (
 	"mydiscordbot/domain"
 	"sync"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/voice"
+	"github.com/disgoorg/snowflake/v2"
 )
 
 type GuildState struct {
@@ -14,13 +15,19 @@ type GuildState struct {
 	IsPlaying       bool
 	CurrentTrack    string
 	Volume          int
-	VoiceChannel    string
-	VoiceConnection *discordgo.VoiceConnection
+	VoiceChannel    snowflake.ID
+	VoiceConn       voice.Conn
 	Player          *audio.DiscordPlayer
 	Manager         *Manager
-	ActiveCommands  []*discordgo.ApplicationCommand
+	ActiveCommands  []ApplicationCommand
 	Data            map[string]any
 	PlaybackControl chan string
 	PlaybackDone    chan struct{}
 	mu              sync.Mutex
+}
+
+type ApplicationCommand struct {
+	ID      snowflake.ID
+	Name    string
+	GuildID snowflake.ID
 }

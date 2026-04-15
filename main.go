@@ -13,6 +13,7 @@ func main() {
 	bot.RegisterCommand(&commands.AddCommand{})
 	bot.RegisterCommand(&commands.MusicCommand{})
 	bot.RegisterCommand(&commands.JoinCommand{})
+	bot.RegisterCommand(&commands.StalkCommand{})
 
 	manager, err := bot.NewManager(config.NewConfig())
 	if err != nil {

@@ -3,16 +3,13 @@ package audio
 import (
 	"bytes"
 	"encoding/binary"
-	"fmt"
 	"io"
 	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
-	"github.com/bwmarrin/discordgo"
 	"layeh.com/gopus"
 )
 
@@ -119,12 +116,8 @@ func (p *DiscordPlayer) PlayURLWithSeek(url string, sampleRate int, seekSeconds 
 	}
 	p.ffmpegMu.Unlock()
 
-	vc := &discordgo.VoiceConnection{}
-
 	p.pcmSend = make(chan []int16, 2)
 	p.pcmClose = make(chan bool)
-
-	go p.sendPCM(vc)
 
 	atomic.StoreInt32(&p.playing, 1)
 
@@ -162,175 +155,6 @@ func (p *DiscordPlayer) PlayURLWithSeek(url string, sampleRate int, seekSeconds 
 	return nil
 }
 
-func (p *DiscordPlayer) SetVoiceConnection(vc *discordgo.VoiceConnection) {
-	p.playerMu.Lock()
-	defer p.playerMu.Unlock()
-}
-
-func (p *DiscordPlayer) PlayURLWithSeekAndVC(url string, sampleRate int, seekSeconds int, vc *discordgo.VoiceConnection) error {
-	fmt.Printf("[Audio] PlayURLWithSeekAndVC called with url: %s\n", url)
-	p.Stop()
-
-	atomic.StoreInt32(&p.stopped, 0)
-
-	p.volumeMu.Lock()
-	vol := p.volume
-	p.volumeMu.Unlock()
-
-	isHTTP := strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://")
-	p.playerMu.Lock()
-	p.isHTTP = isHTTP
-	p.playerMu.Unlock()
-
-	ffmpegReader, ffmpegWriter := io.Pipe()
-	stderrBuf := &bytes.Buffer{}
-
-	p.ffmpegMu.Lock()
-	cmdArgs := []string{}
-	if seekSeconds > 0 {
-		cmdArgs = append(cmdArgs, "-ss", strconv.Itoa(seekSeconds))
-	}
-
-	if isHTTP {
-		cmdArgs = append(cmdArgs,
-			"-reconnect", "1",
-			"-reconnect_streamed", "1",
-			"-reconnect_delay_max", "5",
-			"-fflags", "+genpts",
-			"-loglevel", "error",
-			"-i", url,
-			"-vn",
-			"-filter:a", "volume="+strconv.FormatFloat(vol, 'f', -1, 64),
-			"-f", "s16le",
-			"-ac", "2",
-			"pipe:1")
-	} else {
-		cmdArgs = append(cmdArgs,
-			"-loglevel", "error",
-			"-i", url,
-			"-vn",
-			"-filter:a", "volume="+strconv.FormatFloat(vol, 'f', -1, 64),
-			"-f", "s16le",
-			"-ac", "2",
-			"pipe:1")
-	}
-
-	p.ffmpegCmd = exec.Command(p.ffmpegPath, cmdArgs...)
-	p.ffmpegCmd.Stdout = ffmpegWriter
-	p.ffmpegCmd.Stderr = stderrBuf
-
-	if err := p.ffmpegCmd.Start(); err != nil {
-		p.ffmpegMu.Unlock()
-		return err
-	}
-	p.ffmpegMu.Unlock()
-
-	if vc == nil {
-		return fmt.Errorf("voice connection is nil")
-	}
-
-	if err := vc.Speaking(true); err != nil {
-		return err
-	}
-
-	p.pcmSend = make(chan []int16, 2)
-	p.pcmClose = make(chan bool)
-
-	go p.sendPCM(vc)
-
-	atomic.StoreInt32(&p.playing, 1)
-
-	go func(ffmpegReader *io.PipeReader) {
-		p.ffmpegCmd.Wait()
-		fmt.Printf("[Audio] FFMPEG WAITED\n")
-
-		// Close the pipe reader to unblock binary.Read() in the other goroutine
-		ffmpegReader.Close()
-
-		// Close pcmClose as signal to stop the reading loop (with mutex protection)
-		p.ffmpegMu.Lock()
-		if p.pcmClose != nil {
-			close(p.pcmClose)
-			p.pcmClose = nil
-		}
-		p.ffmpegMu.Unlock()
-
-	}(ffmpegReader)
-
-	go func() {
-		defer vc.Speaking(false)
-		defer close(p.pcmSend)
-		frameCount := 0
-		ffmpegBuf := io.Reader(ffmpegReader)
-	OuterLoop:
-		for {
-			audioBuf := make([]int16, frameSize*channels)
-			err := binary.Read(ffmpegBuf, binary.LittleEndian, audioBuf)
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				fmt.Printf("[Audio] io.EOF err\n")
-				break
-			}
-			if err != nil {
-				fmt.Printf("[Audio] read error: %v, breaking loop\n", err)
-				break
-			}
-
-			frameCount++
-			select {
-			case p.pcmSend <- audioBuf:
-			case <-p.pcmClose:
-				fmt.Printf("[Audio] pcmClose received, breaking loop\n")
-				break OuterLoop
-			}
-		}
-
-		fmt.Printf("[Audio] ffmpeg loop ended, frameCount: %d\n", frameCount)
-
-		if atomic.LoadInt32(&p.stopped) == 0 {
-			atomic.StoreInt32(&p.playing, 0)
-			select {
-			case p.finished <- struct{}{}:
-			default:
-			}
-		}
-	}()
-
-	return nil
-}
-
-func (p *DiscordPlayer) sendPCM(vc *discordgo.VoiceConnection) {
-	for {
-		recv, ok := <-p.pcmSend
-		if !ok {
-			return
-		}
-
-		if !p.IsPlaying() {
-			time.Sleep(20 * time.Millisecond)
-			continue
-		}
-
-		opus, err := p.opusEncoder.Encode(recv, frameSize, maxBytes)
-		if err != nil {
-			continue
-		}
-
-		if vc.Ready == false || vc.OpusSend == nil {
-			return
-		}
-
-		vc.OpusSend <- opus
-
-		p.playerMu.Lock()
-		isHTTP := p.isHTTP
-		p.playerMu.Unlock()
-
-		if isHTTP {
-			time.Sleep(19 * time.Millisecond)
-		}
-	}
-}
-
 func (p *DiscordPlayer) Pause() {
 	atomic.StoreInt32(&p.playing, 0)
 }
@@ -343,9 +167,8 @@ func (p *DiscordPlayer) Stop() {
 	callback := p.onFinished
 	p.onFinished = nil
 
-	// Use atomic to prevent multiple Stop() calls
 	if !atomic.CompareAndSwapInt32(&p.stopped, 0, 1) {
-		return // Already stopped
+		return
 	}
 
 	p.ffmpegMu.Lock()

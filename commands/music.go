@@ -3,15 +3,17 @@ package commands
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
+
 	"mydiscordbot/bot"
 	"mydiscordbot/discord_helper"
 	"mydiscordbot/domain"
 	"mydiscordbot/services/file"
 	"mydiscordbot/services/ytdlp"
-	"strings"
-	"time"
 
-	"github.com/bwmarrin/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
 )
 
 var float64zero float64 = 0
@@ -28,7 +30,6 @@ var musicHandlers = map[string]musicHandler{
 	"volume":   handleVolume,
 	"list":     handleList,
 	"autoplay": handleAutoplay,
-	"init":     handleInit,
 }
 
 type MusicCommand struct {
@@ -44,8 +45,7 @@ func (c *MusicCommand) HandleButton(cs *bot.CommandState, customID string) error
 
 	queuePage, queueOk := discord_helper.ParseQueueAction(customID)
 	if queueOk {
-		channelID := cs.I.ChannelID
-		messageID := cs.I.Message.ID
+		messageID := cs.LastMessageID()
 
 		queueTracks := cs.G.Queue.All()
 		currentTrack := cs.G.CurrentTrack
@@ -55,17 +55,14 @@ func (c *MusicCommand) HandleButton(cs *bot.CommandState, customID string) error
 			totalPages = 1
 		}
 
-		embed, buttons := discord_helper.BuildQueuePageComponents(queueTracks, currentTrack, queuePage, totalPages)
+		msg, buttons := discord_helper.BuildQueuePageComponents(queueTracks, currentTrack, queuePage, totalPages)
 
-		_, editErr := cs.S.ChannelMessageEditComplex(&discordgo.MessageEdit{
-			Channel:    channelID,
-			ID:         messageID,
-			Embed:      embed,
-			Components: &buttons,
-		})
-		if editErr != nil {
-			fmt.Printf("[Music HandleButton] Queue edit error: %v\n", editErr)
-		}
+		embed := discord.NewEmbed().
+			WithDescription(msg).
+			WithColor(TrackBlue)
+
+		components := buildButtons(buttons)
+		cs.UpdateMessage(messageID, "", []discord.Embed{embed}, components)
 		return nil
 	}
 
@@ -87,23 +84,49 @@ func (c *MusicCommand) HandleButton(cs *bot.CommandState, customID string) error
 			totalPages = 1
 		}
 
-		channelID := cs.I.ChannelID
-		messageID := cs.I.Message.ID
+		messageID := cs.LastMessageID()
 
-		embed, buttons := discord_helper.BuildListPageComponents(tracks, page, totalPages)
+		msg, buttons := discord_helper.BuildListPageComponents(tracks, page, totalPages)
 
-		_, editErr := cs.S.ChannelMessageEditComplex(&discordgo.MessageEdit{
-			Channel:    channelID,
-			ID:         messageID,
-			Embed:      embed,
-			Components: &buttons,
-		})
-		if editErr != nil {
-			fmt.Printf("[Music HandleButton] Edit error: %v\n", editErr)
-		}
+		embed := discord.NewEmbed().
+			WithDescription(msg).
+			WithColor(TrackBlue)
+
+		components := buildButtons(buttons)
+		cs.UpdateMessage(messageID, "", []discord.Embed{embed}, components)
 	})
 
 	return nil
+}
+
+const TrackBlue = 0x3498db
+
+func buildButtons(buttonIDs []string) []discord.LayoutComponent {
+	if len(buttonIDs) == 0 {
+		return nil
+	}
+
+	var buttons []discord.InteractiveComponent
+	for _, id := range buttonIDs {
+		parts := strings.Split(id, "_")
+		if len(parts) < 3 {
+			continue
+		}
+
+		action := parts[1]
+		label := "◀"
+		if action == "next" {
+			label = "▶"
+		}
+
+		buttons = append(buttons, discord.NewSecondaryButton(label, id))
+	}
+
+	if len(buttons) == 0 {
+		return nil
+	}
+
+	return []discord.LayoutComponent{discord.NewActionRow(buttons...)}
 }
 
 func (c *MusicCommand) HandleSelectMenu(cs *bot.CommandState, customID string, values []string) error {
@@ -126,127 +149,116 @@ func (c *MusicCommand) HandleSelectMenu(cs *bot.CommandState, customID string, v
 	fileSvc := file.New()
 	fileSvc.ListAll(musicFolders, recursive, func(tracks []domain.Track, err error) {
 		if err != nil {
-			cs.SingleRespond("Error listing files: " + err.Error())
+			cs.SingleResponse("Error listing files: " + err.Error())
 			return
 		}
 
 		globalIndex := page*10 + trackIndex
 		if globalIndex >= len(tracks) {
-			cs.SingleRespond("Track not found")
+			cs.SingleResponse("Track not found")
 			return
 		}
 
 		track := tracks[globalIndex]
 		queueErr := cs.G.Queue.Enqueue(track)
 		if queueErr != nil {
-			cs.SingleRespond("Failed to add to queue: " + queueErr.Error())
+			cs.SingleResponse("Failed to add to queue: " + queueErr.Error())
 			return
 		}
 
 		ensurePlaybackGoroutine(cs)
 
-		channelID := cs.I.ChannelID
-		embed := &discordgo.MessageEmbed{
-			Title:       "Added to queue",
-			Description: track.Title(),
-			Color:       0x2ecc71,
-		}
-		cs.S.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-			Embed: embed,
-		})
+		embed := discord.NewEmbed().
+			WithTitle("Added to queue").
+			WithDescription(track.Title()).
+			WithColor(0x2ecc71)
+
+		cs.SendMessage("", []discord.Embed{embed}, nil)
 	})
 
 	return nil
 }
 
-func (c *MusicCommand) ParseInteraction(i *discordgo.InteractionCreate) *map[string]any {
-	subCmd := i.ApplicationCommandData().Options[0]
+func (c *MusicCommand) ParseInteraction(e *events.ApplicationCommandInteractionCreate) *map[string]any {
+	data := e.SlashCommandInteractionData()
+
+	subCmd := data.CommandName()
+
 	result := map[string]any{
-		"subcommand": subCmd.Name,
+		"subcommand": subCmd,
 	}
-	for _, opt := range subCmd.Options {
-		switch opt.Type {
-		case discordgo.ApplicationCommandOptionString:
-			result[opt.Name] = opt.StringValue()
-		case discordgo.ApplicationCommandOptionInteger:
-			result[opt.Name] = opt.IntValue()
-		case discordgo.ApplicationCommandOptionBoolean:
-			result[opt.Name] = opt.BoolValue()
-		}
+
+	query := data.String("query")
+	if query != "" {
+		result["query"] = query
 	}
+
+	level := data.Int("level")
+	if level != 0 {
+		result["level"] = level
+	}
+
 	return &result
 }
 
-func (c *MusicCommand) GetApplicationCommand() *discordgo.ApplicationCommand {
-	return &discordgo.ApplicationCommand{
-		Name:        c.Name(),
-		Description: c.Description(),
-		Options: []*discordgo.ApplicationCommandOption{
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+func (c *MusicCommand) GetApplicationCommand() discord.ApplicationCommandCreate {
+	return discord.SlashCommandCreate{
+		Name:        "music",
+		Description: "Music player",
+		Options: []discord.ApplicationCommandOption{
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "play",
 				Description: "Play a track or search query",
-				Options: []*discordgo.ApplicationCommandOption{
-					{
-						Type:        discordgo.ApplicationCommandOptionString,
+				Options: []discord.ApplicationCommandOption{
+					discord.ApplicationCommandOptionString{
 						Name:        "query",
 						Description: "YouTube URL or search query",
 						Required:    true,
 					},
 				},
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "pause",
 				Description: "Pause the current playback",
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "resume",
 				Description: "Resume paused playback",
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "stop",
 				Description: "Stop playback and clear the queue",
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "skip",
 				Description: "Skip to the next track in queue",
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "queue",
 				Description: "View the current queue",
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "volume",
 				Description: "Adjust the playback volume",
-				Options: []*discordgo.ApplicationCommandOption{
-					{
-						Type:        discordgo.ApplicationCommandOptionInteger,
+				Options: []discord.ApplicationCommandOption{
+					discord.ApplicationCommandOptionInt{
 						Name:        "level",
 						Description: "Volume level (0-100)",
 						Required:    true,
-						MinValue:    &float64zero,
-						MaxValue:    100,
+						MinValue:    newInt(0),
+						MaxValue:    newInt(100),
 					},
 				},
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "list",
 				Description: "List all tracks in queue",
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "autoplay",
 				Description: "Toggle autoplay mode",
 			},
-			{
-				Type:        discordgo.ApplicationCommandOptionSubCommand,
+			discord.ApplicationCommandOptionSubCommand{
 				Name:        "init",
 				Description: "Initialize the bot in your voice channel",
 			},
@@ -254,10 +266,14 @@ func (c *MusicCommand) GetApplicationCommand() *discordgo.ApplicationCommand {
 	}
 }
 
+func newInt(i int) *int {
+	return &i
+}
+
 func (c *MusicCommand) Execute(cs *bot.CommandState) error {
 	args := cs.Args
 	if args == nil {
-		cs.SingleRespond("Command error: no arguments provided")
+		cs.SingleResponse("Command error: no arguments provided")
 		return fmt.Errorf("no arguments provided")
 	}
 
@@ -265,7 +281,7 @@ func (c *MusicCommand) Execute(cs *bot.CommandState) error {
 
 	handler, ok := musicHandlers[subcommand]
 	if !ok {
-		cs.SingleRespond(fmt.Sprintf("Unknown subcommand: %s", subcommand))
+		cs.SingleResponse(fmt.Sprintf("Unknown subcommand: %s", subcommand))
 		return fmt.Errorf("unknown subcommand: %s", subcommand)
 	}
 
@@ -275,7 +291,7 @@ func (c *MusicCommand) Execute(cs *bot.CommandState) error {
 func handlePlay(cs *bot.CommandState, opts *map[string]any) error {
 	query, ok := (*opts)["query"].(string)
 	if !ok || query == "" {
-		cs.SingleRespond("Query parameter is required")
+		cs.SingleResponse("Query parameter is required")
 		return fmt.Errorf("usage: /music play <query>")
 	}
 
@@ -287,57 +303,57 @@ func handlePlay(cs *bot.CommandState, opts *map[string]any) error {
 }
 
 func handlePause(cs *bot.CommandState, opts *map[string]any) error {
-	if cs.G.VoiceConnection == nil {
-		cs.SingleRespond("Not connected to a voice channel")
+	if cs.G.VoiceConn == nil {
+		cs.SingleResponse("Not connected to a voice channel")
 		return nil
 	}
 	if cs.G.PlaybackControl == nil {
-		cs.SingleRespond("Nothing is playing")
+		cs.SingleResponse("Nothing is playing")
 		return nil
 	}
 	cs.G.PlaybackControl <- "pause"
-	cs.SingleRespond("Paused")
+	cs.SingleResponse("Paused")
 	return nil
 }
 
 func handleResume(cs *bot.CommandState, opts *map[string]any) error {
-	if cs.G.VoiceConnection == nil {
-		cs.SingleRespond("Not connected to a voice channel")
+	if cs.G.VoiceConn == nil {
+		cs.SingleResponse("Not connected to a voice channel")
 		return nil
 	}
 	if cs.G.PlaybackControl == nil {
-		cs.SingleRespond("Nothing is playing")
+		cs.SingleResponse("Nothing is playing")
 		return nil
 	}
 	cs.G.PlaybackControl <- "resume"
-	cs.SingleRespond("Resumed")
+	cs.SingleResponse("Resumed")
 	return nil
 }
 
 func handleStop(cs *bot.CommandState, opts *map[string]any) error {
-	if cs.G.VoiceConnection == nil {
-		cs.SingleRespond("Not connected to a voice channel")
+	if cs.G.VoiceConn == nil {
+		cs.SingleResponse("Not connected to a voice channel")
 		return nil
 	}
 	if cs.G.PlaybackControl != nil {
 		cs.G.PlaybackControl <- "stop"
 	}
 	cs.G.Queue.Clear()
-	cs.SingleRespond("Stopped and queue cleared")
+	cs.SingleResponse("Stopped and queue cleared")
 	return nil
 }
 
 func handleSkip(cs *bot.CommandState, opts *map[string]any) error {
-	if cs.G.VoiceConnection == nil {
-		cs.SingleRespond("Not connected to a voice channel")
+	if cs.G.VoiceConn == nil {
+		cs.SingleResponse("Not connected to a voice channel")
 		return nil
 	}
 	if cs.G.PlaybackControl == nil {
-		cs.SingleRespond("Nothing is playing")
+		cs.SingleResponse("Nothing is playing")
 		return nil
 	}
 	cs.G.PlaybackControl <- "skip"
-	cs.SingleRespond("Skipped")
+	cs.SingleResponse("Skipped")
 	return nil
 }
 
@@ -350,14 +366,15 @@ func handleQueue(cs *bot.CommandState, opts *map[string]any) error {
 		totalPages = 1
 	}
 
-	channelID := cs.I.ChannelID
+	msg, buttons := discord_helper.BuildQueuePageComponents(queueTracks, currentTrack, 0, totalPages)
 
-	embed, buttons := discord_helper.BuildQueuePageComponents(queueTracks, currentTrack, 0, totalPages)
+	embed := discord.NewEmbed().
+		WithDescription(msg).
+		WithColor(TrackBlue)
 
-	cs.S.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-		Embed:      embed,
-		Components: buttons,
-	})
+	components := buildButtons(buttons)
+
+	cs.SendMessage("", []discord.Embed{embed}, components)
 
 	return nil
 }
@@ -368,18 +385,18 @@ func handleVolume(cs *bot.CommandState, opts *map[string]any) error {
 	if !hasLevel {
 		vol := cs.G.Player.Volume()
 		volPercent := int(vol * 100)
-		cs.SingleRespond(fmt.Sprintf("Volume: %d%%", volPercent))
+		cs.SingleResponse(fmt.Sprintf("Volume: %d%%", volPercent))
 		return nil
 	}
 
 	levelInt, ok := level.(int64)
 	if !ok {
-		cs.SingleRespond("Invalid volume level")
+		cs.SingleResponse("Invalid volume level")
 		return nil
 	}
 
 	if levelInt < 0 || levelInt > 100 {
-		cs.SingleRespond("Volume must be between 0 and 100")
+		cs.SingleResponse("Volume must be between 0 and 100")
 		return nil
 	}
 
@@ -388,7 +405,7 @@ func handleVolume(cs *bot.CommandState, opts *map[string]any) error {
 	cs.G.Volume = int(levelInt)
 	cs.G.Data["volume"] = int(levelInt)
 
-	cs.SingleRespond(fmt.Sprintf("Volume: %d%%", levelInt))
+	cs.SingleResponse(fmt.Sprintf("Volume: %d%%", levelInt))
 	return nil
 }
 
@@ -397,21 +414,19 @@ func handleList(cs *bot.CommandState, opts *map[string]any) error {
 	recursive := cs.G.Manager.RecursiveSearch()
 
 	if len(musicFolders) == 0 {
-		cs.SingleRespond("No music folders configured")
+		cs.SingleResponse("No music folders configured")
 		return nil
 	}
-
-	channelID := cs.I.ChannelID
 
 	fileSvc := file.New()
 	fileSvc.ListAll(musicFolders, recursive, func(tracks []domain.Track, err error) {
 		if err != nil {
-			cs.SingleRespond("Failed to list files: " + err.Error())
+			cs.SingleResponse("Failed to list files: " + err.Error())
 			return
 		}
 
 		if len(tracks) == 0 {
-			cs.SingleRespond("No music files found in configured folders")
+			cs.SingleResponse("No music files found in configured folders")
 			return
 		}
 
@@ -420,34 +435,19 @@ func handleList(cs *bot.CommandState, opts *map[string]any) error {
 			totalPages = 1
 		}
 
-		embed, buttons := discord_helper.BuildListPageComponents(tracks, 0, totalPages)
-		cs.S.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-			Embed:      embed,
-			Components: buttons,
-		})
+		msg, buttons := discord_helper.BuildListPageComponents(tracks, 0, totalPages)
+
+		embed := discord.NewEmbed().
+			WithDescription(msg).
+			WithColor(TrackBlue)
+
+		components := buildButtons(buttons)
+
+		cs.SendMessage("", []discord.Embed{embed}, components)
 	})
 
-	cs.SingleRespond("Loading music files...")
+	cs.SingleResponse("Loading music files...")
 	return nil
-}
-
-func sendListPage(cs *bot.CommandState, channelID string, page int) *discordgo.Message {
-	tracks := cs.G.Data["list_tracks"].([]domain.Track)
-	totalPages := cs.G.Data["list_totalPages"].(int)
-
-	embed, buttons := discord_helper.BuildListPageComponents(tracks, page, totalPages)
-
-	msg, err := cs.S.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
-		Embed:      embed,
-		Components: buttons,
-	})
-
-	if err != nil {
-		fmt.Printf("Error sending list page: %v\n", err)
-		return nil
-	}
-
-	return msg
 }
 
 func handleAutoplay(cs *bot.CommandState, opts *map[string]any) error {
@@ -455,21 +455,16 @@ func handleAutoplay(cs *bot.CommandState, opts *map[string]any) error {
 	if !ok {
 		autoplay = true
 		cs.G.Data["autoplay"] = true
-		cs.SingleRespond("Autoplay: enabled (default)")
+		cs.SingleResponse("Autoplay: enabled (default)")
 		return nil
 	}
 	cs.G.Data["autoplay"] = !autoplay
 	fmt.Printf("[Autoplay] Toggled to: %v for guild %s\n", cs.G.Data["autoplay"], cs.G.GuildId)
 	if cs.G.Data["autoplay"].(bool) {
-		cs.SingleRespond("Autoplay: enabled")
+		cs.SingleResponse("Autoplay: enabled")
 	} else {
-		cs.SingleRespond("Autoplay: disabled")
+		cs.SingleResponse("Autoplay: disabled")
 	}
-	return nil
-}
-
-func handleInit(cs *bot.CommandState, opts *map[string]any) error {
-	cs.SingleRespond("Init functionality not implemented yet")
 	return nil
 }
 
@@ -509,27 +504,26 @@ func stripPlaylistParam(url string) string {
 }
 
 func addURL(cs *bot.CommandState, url string) error {
-	s := cs.S
 	g := cs.G
 	if hasPlaylistParam(url) {
-		cs.SingleRespond(fmt.Sprintf("A busca %s contem uma playlist adicionando todos...", url))
+		cs.SingleResponse(fmt.Sprintf("A busca %s contem uma playlist adicionando todos...", url))
 
 		ytSvc := ytdlp.New()
 		ytSvc.ParsePlaylist(context.Background(), url, func(tracks []domain.Track, err error) {
 			if err != nil {
-				s.ChannelMessageSend("", "Failed to fetch playlist: "+err.Error())
+				cs.SingleResponse("Failed to fetch playlist: " + err.Error())
 				return
 			}
 
-			s.ChannelMessageSend("", fmt.Sprintf("Adding %d tracks:", len(tracks)))
+			cs.SingleResponse(fmt.Sprintf("Adding %d tracks:", len(tracks)))
 			for _, track := range tracks {
 				err := g.Queue.Enqueue(track)
 				if err != nil {
-					s.ChannelMessageSend("", "Failed to add to queue: "+err.Error())
+					cs.SingleResponse("Failed to add to queue: " + err.Error())
 					return
 				}
 			}
-			s.ChannelMessageSend("", "Playlist added!")
+			cs.SingleResponse("Playlist added!")
 
 			ensurePlaybackGoroutine(cs)
 		})
@@ -538,29 +532,29 @@ func addURL(cs *bot.CommandState, url string) error {
 
 	url = stripPlaylistParam(url)
 
-	cs.SingleRespond(fmt.Sprintf("Buscando por: %s", url))
+	cs.SingleResponse(fmt.Sprintf("Buscando por: %s", url))
 
 	ytSvc := ytdlp.New()
 	ytSvc.ParseURL(context.Background(), url, func(track domain.Track, err error) {
 		if err != nil {
-			cs.SingleRespond(fmt.Sprintf("Falha ao buscar track %s: %s", url, err.Error()))
+			cs.SingleResponse(fmt.Sprintf("Falha ao buscar track %s: %s", url, err.Error()))
 			return
 		}
 
 		ytSvc.GetAudioURL(context.Background(), url, func(audioURL string, err error) {
 			if err != nil {
-				cs.SingleRespond(fmt.Sprintf("Falha ao buscar audio de %s: %s", url, err.Error()))
+				cs.SingleResponse(fmt.Sprintf("Falha ao buscar audio de %s: %s", url, err.Error()))
 				return
 			}
 			track.SetAudioURL(audioURL)
 
 			err = cs.G.Queue.Enqueue(track)
 			if err != nil {
-				cs.SingleRespond(fmt.Sprintf("Falha ao adicionar %s na queue: %s", url, err.Error()))
+				cs.SingleResponse(fmt.Sprintf("Falha ao adicionar %s na queue: %s", url, err.Error()))
 				return
 			}
 
-			cs.SingleRespond(fmt.Sprintf("%s adicionado a queue", track.Title()))
+			cs.SingleResponse(fmt.Sprintf("%s adicionado a queue", track.Title()))
 
 			ensurePlaybackGoroutine(cs)
 		})
@@ -577,7 +571,7 @@ func searchAndAdd(cs *bot.CommandState, query string) error {
 	fileSvc := file.New()
 	fileSvc.Search(musicFolders, query, recursive, func(fileResults []domain.Track, err error) {
 		if err != nil {
-			cs.SingleRespond("Falha na busca de arquivos: " + err.Error())
+			cs.SingleResponse("Falha na busca de arquivos: " + err.Error())
 			return
 		}
 
@@ -585,11 +579,11 @@ func searchAndAdd(cs *bot.CommandState, query string) error {
 			track := fileResults[0]
 			err := g.Queue.Enqueue(track)
 			if err != nil {
-				cs.SingleRespond("Falha ao adicionar à queue: " + err.Error())
+				cs.SingleResponse("Falha ao adicionar à queue: " + err.Error())
 				return
 			}
 
-			cs.SingleRespond("Adicionado: " + track.Title())
+			cs.SingleResponse("Adicionado: " + track.Title())
 			ensurePlaybackGoroutine(cs)
 			return
 		}
@@ -601,41 +595,41 @@ func searchAndAdd(cs *bot.CommandState, query string) error {
 }
 
 func searchAndAddYouTube(cs *bot.CommandState, query string) error {
-	cs.SingleRespond("Buscando no YouTube...")
+	cs.SingleResponse("Buscando no YouTube...")
 
 	ytSvc := ytdlp.New()
 	ytSvc.Search(context.Background(), query, 5, func(results []domain.SearchResult, err error) {
 		if err != nil {
-			cs.SingleRespond("Falha na busca: " + err.Error())
+			cs.SingleResponse("Falha na busca: " + err.Error())
 			return
 		}
 
 		if len(results) == 0 {
-			cs.SingleRespond("Nenhum resultado encontrado")
+			cs.SingleResponse("Nenhum resultado encontrado")
 			return
 		}
 
 		result := results[0]
 		ytSvc.ParseURL(context.Background(), result.URL, func(track domain.Track, err error) {
 			if err != nil {
-				cs.SingleRespond("Falha ao analisar URL: " + err.Error())
+				cs.SingleResponse("Falha ao analisar URL: " + err.Error())
 				return
 			}
 
 			ytSvc.GetAudioURL(context.Background(), result.URL, func(audioURL string, err error) {
 				if err != nil {
-					cs.SingleRespond("Falha ao buscar URL do áudio: " + err.Error())
+					cs.SingleResponse("Falha ao buscar URL do áudio: " + err.Error())
 					return
 				}
 				track.SetAudioURL(audioURL)
 
 				err = cs.G.Queue.Enqueue(track)
 				if err != nil {
-					cs.SingleRespond("Falha ao adicionar à queue: " + err.Error())
+					cs.SingleResponse("Falha ao adicionar à queue: " + err.Error())
 					return
 				}
 
-				cs.SingleRespond("Adicionado: " + track.Title())
+				cs.SingleResponse("Adicionado: " + track.Title())
 
 				ensurePlaybackGoroutine(cs)
 			})
@@ -645,31 +639,12 @@ func searchAndAddYouTube(cs *bot.CommandState, query string) error {
 	return nil
 }
 
-func playNext(cs *bot.CommandState) {
-	ensurePlaybackGoroutine(cs)
-}
-
 func ensurePlaybackGoroutine(cs *bot.CommandState) {
 	g := cs.G
 
-	if g.VoiceConnection == nil && cs.I != nil {
-		userID := cs.I.Member.User.ID
-		guildID := g.GuildId
-
-		vs, err := cs.S.State.VoiceState(guildID, userID)
-		if err != nil || vs == nil || vs.ChannelID == "" {
-			cs.SingleRespond("You are not in a voice channel")
-			return
-		}
-
-		vc, err := cs.S.ChannelVoiceJoin(guildID, vs.ChannelID, false, true)
-		if err != nil {
-			cs.SingleRespond("Failed to join voice channel: " + err.Error())
-			return
-		}
-
-		g.VoiceConnection = vc
-		g.VoiceChannel = vs.ChannelID
+	if g.VoiceConn == nil {
+		cs.SingleResponse("Use /join first to connect to a voice channel")
+		return
 	}
 
 	if g.PlaybackControl == nil {
@@ -700,7 +675,6 @@ func startPlayback(g *bot.GuildState) {
 		if isPaused && g.Queue.IsEmpty() && !autoplay {
 			fmt.Printf("[Playback] Exit: isPaused=%v, queueEmpty=%v, autoplay=%v\n", isPaused, g.Queue.IsEmpty(), autoplay)
 			g.IsPlaying = false
-			notifyPlaybackChanged(g, "stopped")
 			return
 		}
 
@@ -708,7 +682,7 @@ func startPlayback(g *bot.GuildState) {
 			if g.Queue.IsEmpty() {
 				fmt.Printf("[Playback] Queue empty, autoplay=%v\n", autoplay)
 				if autoplay {
-					notifyPlaybackChanged(g, "autoplay")
+					fmt.Printf("[Playback] Autoplay enabled but no next track\n")
 				}
 				time.Sleep(100 * time.Millisecond)
 				continue
@@ -725,8 +699,7 @@ func startPlayback(g *bot.GuildState) {
 			g.CurrentTrack = track.Title()
 			g.IsPlaying = true
 			fmt.Printf("[Playback] Playing track: %s\n", track.Title())
-			notifyPlaybackChanged(g, "playing")
-			g.Player.PlayURLWithSeekAndVC(track.AudioURL(), 48000, 0, g.VoiceConnection)
+			g.Player.PlayURLWithSeek(track.AudioURL(), 48000, 0)
 		}
 
 		fmt.Printf("[Playback] Waiting for Finished or Command...\n")
@@ -747,21 +720,19 @@ func handlePlaybackCommand(g *bot.GuildState, cmd string) {
 	case "pause":
 		g.Player.Pause()
 		g.IsPlaying = false
-		notifyPlaybackChanged(g, "paused")
 	case "resume":
 		g.Player.Resume()
 		g.IsPlaying = true
-		notifyPlaybackChanged(g, "playing")
 	case "stop":
 		g.Player.Stop()
 		g.Queue.Clear()
 		g.CurrentTrack = ""
 		g.IsPlaying = false
-		notifyPlaybackChanged(g, "stopped")
 	case "skip":
 		g.Player.Stop()
 	}
 }
 
-func notifyPlaybackChanged(g *bot.GuildState, status string) {
+func (c *MusicCommand) HandleModalSubmit(cs *bot.CommandState, customID string, data map[string]string) error {
+	return nil
 }
