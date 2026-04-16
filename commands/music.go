@@ -178,6 +178,10 @@ func (c *MusicCommand) ParseInteraction(e *events.ApplicationCommandInteractionC
 		"subcommand": subCmd,
 	}
 
+	if member := e.Member(); member != nil {
+		result["member"] = member.User.ID
+	}
+
 	for name, opt := range data.Options {
 		switch opt.Type {
 		case discord.ApplicationCommandOptionTypeString:
@@ -624,8 +628,10 @@ func ensurePlaybackGoroutine(cs *bot.CommandState) {
 	g := cs.G
 
 	if g.VoiceConn == nil {
-		cs.SingleResponse("Use /join first to connect to a voice channel")
-		return
+		if err := JoinVoiceChannel(cs); err != nil {
+			cs.SingleResponse(err.Error())
+			return
+		}
 	}
 
 	if g.PlaybackControl == nil {
@@ -644,6 +650,8 @@ func startPlayback(g *bot.GuildState) {
 		g.PlaybackDone = nil
 		fmt.Printf("[Playback] Goroutine exiting for guild %s\n", g.GuildId)
 	}()
+
+	ctx := context.Background()
 
 	for {
 		autoplay, _ := g.Data["autoplay"].(bool)
@@ -680,7 +688,8 @@ func startPlayback(g *bot.GuildState) {
 			g.CurrentTrack = track.Title()
 			g.IsPlaying = true
 			fmt.Printf("[Playback] Playing track: %s\n", track.Title())
-			g.Player.PlayURLWithSeek(track.AudioURL(), 48000, 0)
+			g.Player.SetVoiceConn(g.VoiceConn)
+			g.Player.PlayURLWithSeekAndVC(ctx, track.AudioURL(), 48000, 0, g.VoiceConn)
 		}
 
 		fmt.Printf("[Playback] Waiting for Finished or Command...\n")

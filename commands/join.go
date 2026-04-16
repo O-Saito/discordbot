@@ -128,3 +128,64 @@ func (c *JoinCommand) HandleSelectMenu(cs *bot.CommandState, customID string, va
 func (c *JoinCommand) HandleModalSubmit(cs *bot.CommandState, customID string, data map[string]string) error {
 	return nil
 }
+
+func JoinVoiceChannel(cs *bot.CommandState) error {
+	args := cs.Args
+	g := cs.G
+
+	guildID := snowflake.MustParse(g.GuildId)
+	var channelID snowflake.ID
+
+	if ch, ok := (*args)["channel"].(snowflake.ID); ok && ch != 0 {
+		channelID = ch
+	}
+
+	if channelID == 0 {
+		var userID snowflake.ID
+
+		if user, ok := (*args)["user"].(snowflake.ID); ok && user != 0 {
+			userID = user
+		}
+
+		if userID == 0 {
+			if member, ok := (*args)["member"].(snowflake.ID); ok && member != 0 {
+				userID = member
+			}
+		}
+
+		if userID != 0 && cs.Client != nil {
+			caches := cs.Client.Caches
+			voiceStates := caches.VoiceStates(snowflake.MustParse(g.GuildId))
+			for vs := range voiceStates {
+				if vs.UserID == userID && vs.ChannelID != nil {
+					channelID = *vs.ChannelID
+					break
+				}
+			}
+		}
+	}
+
+	if channelID == 0 {
+		return fmt.Errorf("please specify a voice channel or join one yourself")
+	}
+
+	if g.VoiceConn != nil && g.VoiceChannel != 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		g.VoiceConn.Close(ctx)
+		cancel()
+	}
+
+	if g.VoiceConn == nil {
+		conn := cs.G.Manager.Client().VoiceManager.CreateConn(guildID)
+		g.VoiceConn = conn
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := g.VoiceConn.Open(ctx, channelID, false, false); err != nil {
+		return fmt.Errorf("error joining channel: %w", err)
+	}
+
+	g.VoiceChannel = channelID
+	return nil
+}
