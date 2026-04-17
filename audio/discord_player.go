@@ -230,10 +230,6 @@ func (p *DiscordPlayer) PlayURLWithSeekAndVC(ctx context.Context, url string, sa
 		return fmt.Errorf("voice connection is nil")
 	}
 
-	if err := vc.SetSpeaking(ctx, voice.SpeakingFlagMicrophone); err != nil {
-		return err
-	}
-
 	p.pcmSend = make(chan []int16, 5)
 	p.pcmClose = make(chan bool)
 
@@ -255,7 +251,6 @@ func (p *DiscordPlayer) PlayURLWithSeekAndVC(ctx context.Context, url string, sa
 	}(ffmpegReader)
 
 	go func() {
-		defer vc.SetSpeaking(ctx, voice.SpeakingFlagMicrophone|voice.SpeakingFlagSoundshare)
 		defer close(p.pcmSend)
 
 		frameCount := 0

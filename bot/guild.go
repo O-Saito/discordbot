@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"mydiscordbot/audio"
 	"mydiscordbot/domain"
 	"os"
@@ -50,6 +51,11 @@ type GuildState struct {
 	audioSenderStopped chan struct{}
 	opusEncoder        *gopus.Encoder
 	playerMu           sync.Mutex
+	isSpeaking         bool
+	speakingMu         sync.Mutex
+	speakingTimeout    time.Duration
+	ctx                context.Context
+	cancel             context.CancelFunc
 }
 
 type ApplicationCommand struct {
@@ -71,6 +77,9 @@ func (g *GuildState) OpenAudioStream() chan []int16 {
 		return nil
 	}
 	g.opusEncoder = encoder
+
+	g.ctx, g.cancel = context.WithCancel(context.Background())
+	g.speakingTimeout = 2 * time.Second
 
 	g.AudioInput = make(chan []int16, 5)
 	g.audioSenderDone = make(chan struct{})
@@ -95,21 +104,49 @@ func (g *GuildState) audioSender() {
 	defer ticker.Stop()
 
 	silence := make([]int16, frameSize*channels)
+	lastAudioTime := time.Now()
 
 	for {
 		select {
 		case <-g.audioSenderDone:
+			g.speakingMu.Lock()
+			if g.isSpeaking && g.VoiceConn != nil {
+				g.VoiceConn.SetSpeaking(g.ctx, voice.SpeakingFlagMicrophone|voice.SpeakingFlagSoundshare)
+				g.isSpeaking = false
+			}
+			g.speakingMu.Unlock()
 			return
 		case <-ticker.C:
 			var pcm []int16
 			select {
 			case pcm = <-g.AudioInput:
 			default:
-				pcm = silence
+				pcm = nil
+			}
+
+			hasActualAudio := pcm != nil && !isSilent(pcm)
+
+			if hasActualAudio {
+				g.speakingMu.Lock()
+				if !g.isSpeaking && g.VoiceConn != nil {
+					g.VoiceConn.SetSpeaking(g.ctx, voice.SpeakingFlagMicrophone)
+					g.isSpeaking = true
+				}
+				g.speakingMu.Unlock()
+				lastAudioTime = time.Now()
+			}
+
+			if time.Since(lastAudioTime) > g.speakingTimeout && g.isSpeaking {
+				g.speakingMu.Lock()
+				if g.isSpeaking && g.VoiceConn != nil {
+					g.VoiceConn.SetSpeaking(g.ctx, voice.SpeakingFlagMicrophone|voice.SpeakingFlagSoundshare)
+					g.isSpeaking = false
+				}
+				g.speakingMu.Unlock()
 			}
 
 			if pcm == nil {
-				continue
+				pcm = silence
 			}
 
 			opus, err := g.opusEncoder.Encode(pcm, frameSize, maxBytes)
@@ -129,9 +166,23 @@ func (g *GuildState) audioSender() {
 	}
 }
 
+func isSilent(pcm []int16) bool {
+	for _, v := range pcm {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func (g *GuildState) CloseAudioStream() {
 	g.playerMu.Lock()
 	defer g.playerMu.Unlock()
+
+	if g.cancel != nil {
+		g.cancel()
+		g.cancel = nil
+	}
 
 	if g.audioSenderDone != nil {
 		close(g.audioSenderDone)
