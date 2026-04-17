@@ -168,7 +168,7 @@ func (p *DiscordPlayer) SetVoiceConn(conn voice.Conn) {
 	p.voiceConn = conn
 }
 
-func (p *DiscordPlayer) PlayURLWithSeekAndVC(ctx context.Context, url string, sampleRate int, seekSeconds int, vc voice.Conn) error {
+func (p *DiscordPlayer) PlayURLWithSeekAndVC(ctx context.Context, url string, sampleRate int, seekSeconds int, vc voice.Conn, audioInput chan []int16) error {
 	fmt.Printf("[Audio] PlayURLWithSeekAndVC called with url: %s\n", url)
 	p.Stop()
 
@@ -234,10 +234,8 @@ func (p *DiscordPlayer) PlayURLWithSeekAndVC(ctx context.Context, url string, sa
 		return err
 	}
 
-	p.pcmSend = make(chan []int16, 2)
+	p.pcmSend = make(chan []int16, 5)
 	p.pcmClose = make(chan bool)
-
-	go p.sendPCM(ctx, vc)
 
 	atomic.StoreInt32(&p.playing, 1)
 
@@ -266,24 +264,24 @@ func (p *DiscordPlayer) PlayURLWithSeekAndVC(ctx context.Context, url string, sa
 			audioBuf := make([]int16, frameSize*channels)
 			err := binary.Read(ffmpegBuf, binary.LittleEndian, audioBuf)
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				fmt.Printf("[Audio] io.EOF err\n")
+				fmt.Printf("[Audio] ffmpeg: io.EOF, frameCount=%d\n", frameCount)
 				break
 			}
 			if err != nil {
-				fmt.Printf("[Audio] read error: %v, breaking loop\n", err)
+				fmt.Printf("[Audio] ffmpeg: read error: %v, frameCount=%d\n", err, frameCount)
 				break
 			}
 
 			frameCount++
 			select {
-			case p.pcmSend <- audioBuf:
+			case audioInput <- audioBuf:
 			case <-p.pcmClose:
-				fmt.Printf("[Audio] pcmClose received, breaking loop\n")
+				fmt.Printf("[Audio] ffmpeg: pcmClose received, frameCount=%d\n", frameCount)
 				return
 			}
 		}
 
-		fmt.Printf("[Audio] ffmpeg loop ended, frameCount: %d\n", frameCount)
+		fmt.Printf("[Audio] ffmpeg: loop ended, total frames=%d\n", frameCount)
 
 		if atomic.LoadInt32(&p.stopped) == 0 {
 			atomic.StoreInt32(&p.playing, 0)
@@ -304,28 +302,34 @@ func (p *DiscordPlayer) sendPCM(ctx context.Context, vc voice.Conn) {
 	for {
 		select {
 		case <-p.pcmClose:
+			fmt.Printf("[Audio] sendPCM: pcmClose received, returning\n")
 			return
 		case <-ticker.C:
 			recv, ok := <-p.pcmSend
 			if !ok {
+				fmt.Printf("[Audio] sendPCM: pcmSend closed, returning\n")
 				return
 			}
 
 			if !p.IsPlaying() {
+				fmt.Printf("[Audio] sendPCM: not playing, skipping frame\n")
 				continue
 			}
 
 			opus, err := p.opusEncoder.Encode(recv, frameSize, maxBytes)
 			if err != nil {
+				fmt.Printf("[Audio] sendPCM: encode error: %v\n", err)
 				continue
 			}
 
 			if vc == nil {
+				fmt.Printf("[Audio] sendPCM: vc is nil\n")
 				return
 			}
 
 			_, err = vc.UDP().Write(opus)
 			if err != nil {
+				fmt.Printf("[Audio] sendPCM: UDP write error: %v\n", err)
 				return
 			}
 		}

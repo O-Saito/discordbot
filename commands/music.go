@@ -689,7 +689,8 @@ func startPlayback(g *bot.GuildState) {
 			g.IsPlaying = true
 			fmt.Printf("[Playback] Playing track: %s\n", track.Title())
 			g.Player.SetVoiceConn(g.VoiceConn)
-			g.Player.PlayURLWithSeekAndVC(ctx, track.AudioURL(), 48000, 0, g.VoiceConn)
+			audioInput := g.OpenAudioStream()
+			g.Player.PlayURLWithSeekAndVC(ctx, track.AudioURL(), 48000, 0, g.VoiceConn, audioInput)
 		}
 
 		fmt.Printf("[Playback] Waiting for Finished or Command...\n")
